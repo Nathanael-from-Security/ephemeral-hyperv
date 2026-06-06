@@ -1,0 +1,114 @@
+#####################################################
+--- Ephemeral VMs ---
+#####################################################
+
+# Create
+C:\VMs\New-ClaudeEphemeral.ps1
+C:\VMs\New-ClaudeEphemeral.ps1 -Name claude-task-001
+C:\VMs\New-ClaudeEphemeral.ps1 -Name claude-maint-001 -Maintenance
+
+# Connect
+ssh -i "C:\VMs\ssh\claude_sandbox_ed25519" sandbox@172.30.101.50
+ssh -i "$env:USERPROFILE\.ssh\claude_sandbox_ed25519" sandbox@172.30.101.50
+vmconnect.exe localhost "claude-ephemeral-20260605-125005"
+
+# Send a repo from Windows
+cd \\wsl$\Ubuntu\home\nathrais\path\
+git bundle create repo.bundle --all
+scp -i "$env:USERPROFILE\.ssh\claude_sandbox_ed25519" .\repo.bundle user@172.30.101.50:/tmp/
+# Receive repo
+git clone /tmp/repo.bundle repo
+cd repo
+git status
+
+# Pull a repo from VM to Windows
+scp -i "$env:USERPROFILE\.ssh\claude_sandbox_ed25519" -r user@172.30.101.50:/tmp/sec-agent/security/ \\wsl$\Ubuntu\home\nathrais\test\scan-results\
+
+# Destroy
+C:\VMs\Remove-ClaudeEphemeral.ps1 -Name claude-task-001
+
+# See running VM
+Get-VM | Where-Object State -eq "Running"
+
+# NOTES:
+# - run only one clone at a time, or you will get IP conflicts
+# - keep claude-base powered off while an ephemeral clone is running unless you change the clone’s IP
+
+#####################################################
+# Maintenance
+#####################################################
+
+# Host: ensure no ephemeral VM is using the template
+Get-VM | Where-Object Name -like "claude-ephemeral-*"
+
+# Host: start base
+Start-VM -Name "claude-base"
+
+# Host: allow temporary outbound for updates
+C:\VMs\ClaudeSandbox.ps1 maintenance
+
+# Re-lock base networking
+C:\VMs\ClaudeSandbox.ps1 locked
+
+# Shut down cleanly
+Stop-VM -Name "claude-base"
+
+# REBUILD
+$template = "C:\VMs\templates\claude-base-template.vhdx"
+$source   = "C:\HyperV\claude-base\claude-base.vhdx"
+
+# Remove read-only flag from old template so it can be replaced
+if (Test-Path $template) {
+    Set-ItemProperty -Path $template -Name IsReadOnly -Value $false
+    Remove-Item $template -Force
+}
+
+Copy-Item $source $template
+
+Set-ItemProperty -Path $template -Name IsReadOnly -Value $true
+
+
+#####################################################
+OLD COMMANDS CREATED WHEN I WAS RUNNING A SINGLE VM
+#####################################################
+
+--- Check Network ACL controls ---
+
+C:\VMs\ClaudeSandbox.ps1 status
+
+# enter permissive mode
+C:\VMs\ClaudeSandbox.ps1 maintenance
+
+# relock down the ACLs
+C:\VMs\ClaudeSandbox.ps1 locked
+
+
+--- Start VM ---
+
+Start-VM -Name "claude-base"
+vmconnect.exe localhost "claude-base"
+
+--- Start Squid Proxy ---
+Restart-Service -Name squidsrv
+Get-Service -Name squidsrv
+Get-NetTCPConnection -LocalPort 3128 -State Listen |
+  Select-Object LocalAddress, LocalPort, State, OwningProcess
+  
+  
+--- Review Squid Config ---
+$SquidConf = "C:\Squid\etc\squid\squid.conf"
+Get-Content $SquidConf |
+  Where-Object {
+    $_ -match '\S' -and
+    $_ -notmatch '^\s*#'
+  } |
+  Select-String -Pattern '^\s*(acl|http_access|http_port|https_port|always_direct|never_direct|cache_peer|request_header_access|reply_header_access|dns_nameservers|access_log|cache_log|visible_hostname)\b'
+  
+  
+--- Test VM connection and connect ---
+
+Test-NetConnection 172.30.101.50 -Port 22
+ssh -i "C:\VMs\ssh\claude_sandbox_ed25519" sandbox@172.30.101.50
+
+
+---------------------------------------------
