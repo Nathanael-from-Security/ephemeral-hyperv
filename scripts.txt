@@ -38,35 +38,77 @@ Get-VM | Where-Object State -eq "Running"
 # Maintenance
 #####################################################
 
-# Host: ensure no ephemeral VM is using the template
-Get-VM | Where-Object Name -like "claude-ephemeral-*"
+# Host: run from elevated PowerShell
+Set-ExecutionPolicy -Scope Process Bypass
+C:\VMs\Update-ClaudeBase.ps1
 
-# Host: start base
-Start-VM -Name "claude-base"
+# If you do not want vmconnect to open automatically:
+C:\VMs\Update-ClaudeBase.ps1 -NoConnect
 
-# Host: allow temporary outbound for updates
-C:\VMs\ClaudeSandbox.ps1 maintenance
+# If a VM refuses to stop cleanly:
+C:\VMs\Update-ClaudeBase.ps1 -Force
 
-# Re-lock base networking
-C:\VMs\ClaudeSandbox.ps1 locked
+# Connect after the script starts claude-base
+ssh -i "C:\VMs\ssh\claude_sandbox_ed25519" sandbox@172.30.101.50
 
-# Shut down cleanly
+# Inside claude-base: verify maintenance networking
+sudo apt update
+sudo apt upgrade -y
+sudo apt autoremove -y
+sudo apt clean
+
+# Inside claude-base: make any baseline changes future clones should inherit
+# Examples:
+# pipx upgrade-all
+# npm update -g
+# docker pull <image>
+# systemctl status ssh
+
+# Host: when maintenance is finished, re-lock networking
+C:\VMs\Maintenance-ClaudeBase.ps1 -Mode locked
+
+# Host: verify locked ACLs are restored
+C:\VMs\Maintenance-ClaudeBase.ps1 -Mode status
+
+# Host: shut down claude-base cleanly
 Stop-VM -Name "claude-base"
 
-# REBUILD
+# Host: wait until the VM is fully off before copying the disk
+while ((Get-VM -Name "claude-base").State -ne "Off") {
+    Start-Sleep -Seconds 2
+}
+
+########
+# Host: REBUILD the read-only template from the updated base disk
+########
 $template = "C:\VMs\templates\claude-base-template.vhdx"
 $source   = "C:\HyperV\claude-base\claude-base.vhdx"
 
-# Remove read-only flag from old template so it can be replaced
 if (Test-Path $template) {
     Set-ItemProperty -Path $template -Name IsReadOnly -Value $false
     Remove-Item $template -Force
 }
 
 Copy-Item $source $template
-
 Set-ItemProperty -Path $template -Name IsReadOnly -Value $true
 
+# Host: final sanity checks
+Get-Item $template, $source | Select-Object FullName, IsReadOnly
+Get-VM -Name "claude-base"
+Get-Item "C:\VMs\templates\claude-base-template.vhdx" |
+    Select-Object FullName, IsReadOnly
+C:\VMs\Maintenance-ClaudeBase.ps1 -Mode status
+
+
+#####################################################
+# COMMON ERRORS # FAQ #
+#####################################################
+
+# ERROR: Hyper-V switch not found: fresh-claude-switch
+# SOLUTION: Run the startup script as admin
+
+# ERROR: Cannot connect to Claude in Sandbox (ex: )
+# SOLUTION: 
 
 #####################################################
 OLD COMMANDS CREATED WHEN I WAS RUNNING A SINGLE VM

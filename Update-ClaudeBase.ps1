@@ -171,15 +171,17 @@ Write-Ok "Base image is ready for maintenance."
 Write-Host ""
 Write-Host "After updating the base VM, shut it down cleanly, re-lock networking, and rebuild the template:"
 Write-Host ""
-Write-Host "    Stop-VM -Name `"$BaseVmName`""
-Write-Host "    while ((Get-VM -Name `"$BaseVmName`\").State -ne `"Off`\") { Start-Sleep -Seconds 2 }"
-Write-Host "    & `"$NetworkScriptPath`" -Mode locked"
+Write-Host ('    Stop-VM -Name "{0}"' -f $BaseVmName)
+Write-Host ('    while ((Get-VM -Name "{0}").State -ne "Off") {{ Start-Sleep -Seconds 2 }}' -f $BaseVmName)
+Write-Host ('    & "{0}" -Mode locked' -f $NetworkScriptPath)
 Write-Host ""
-Write-Host "    `$template = `"$TemplateVhdPath`""
-Write-Host "    `$source   = `"$BaseVhdPath`""
-Write-Host "    if (Test-Path `$template) {"
-Write-Host "        Set-ItemProperty -Path `$template -Name IsReadOnly -Value `$false"
-Write-Host "        Remove-Item `$template -Force"
-Write-Host "    }"
-Write-Host "    Copy-Item `$source `$template"
-Write-Host "    Set-ItemProperty -Path `$template -Name IsReadOnly -Value `$true"
+Write-Host ('    Get-VM | Where-Object Name -like "{0}"' -f $EphemeralVmNamePattern)
+Write-Host ""
+Write-Host ('    $template = "{0}"' -f $TemplateVhdPath)
+Write-Host ('    $source   = "{0}"' -f $BaseVhdPath)
+Write-Host '    if (Test-Path $template) {'
+Write-Host '        Set-ItemProperty -Path $template -Name IsReadOnly -Value $false'
+Write-Host '        Remove-Item $template -Force'
+Write-Host '    }'
+Write-Host '    Copy-Item $source $template'
+Write-Host '    Set-ItemProperty -Path $template -Name IsReadOnly -Value $true'

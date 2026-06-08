@@ -20,7 +20,49 @@ $Root         = "C:\VMs\ephemeral"
 $DiskDir      = "$Root\disks"
 $VmRootDir    = "$Root\vms"
 
-$HostIP       = "172.30.101.1"
+# Figure out the host IP to whitelist later
+$HostIP = (
+    Get-NetIPAddress `
+        -InterfaceAlias "vEthernet ($SwitchName)" `
+        -AddressFamily IPv4 |
+    Where-Object {
+        $_.IPAddress -notlike "169.254.*" -and
+        $_.PrefixOrigin -ne "WellKnown"
+    } |
+    Select-Object -First 1 -ExpandProperty IPAddress
+)
+
+if ([string]::IsNullOrWhiteSpace($HostIP)) {
+    throw "Could not determine host IP for vEthernet ($SwitchName)"
+}
+
+# Check if the switch has the right IP that is whitelisted
+$SwitchInterfaceAlias = "vEthernet ($SwitchName)"
+
+$ExistingSwitchIP = Get-NetIPAddress `
+    -InterfaceAlias $SwitchInterfaceAlias `
+    -AddressFamily IPv4 `
+    -ErrorAction SilentlyContinue |
+    Where-Object { $_.IPAddress -eq $HostIP }
+
+if (-not $ExistingSwitchIP) {
+    $Command = @"
+New-NetIPAddress ``````
+    -InterfaceAlias "$SwitchInterfaceAlias" ``````
+    -IPAddress $HostIP ``````
+    -PrefixLength 24
+"@
+
+    Write-Host "Your switch $SwitchInterfaceAlias does not have a whitelisted IP."
+    Write-Host "Expected: $HostIP/24"
+    Write-Host ""
+    Write-Host "Run the following in an elevated PowerShell session:"
+    Write-Host $Command
+    Write-Host ""
+
+    throw "Missing required switch IP: $HostIP/24 on $SwitchInterfaceAlias"
+}
+
 $ClaudeAPI    = "160.79.104.0/21"
 
 if (-not (Test-Path $TemplateDisk)) {
