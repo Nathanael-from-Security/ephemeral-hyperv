@@ -63,7 +63,17 @@ New-NetIPAddress ``````
     throw "Missing required switch IP: $HostIP/24 on $SwitchInterfaceAlias"
 }
 
+# api.anthropic.com
 $ClaudeAPI    = "160.79.104.0/21"
+
+# "api.openai.com",
+# "auth.openai.com"
+$CodexAPI = @(
+    "104.18.41.241/32",
+    "162.159.140.245/32",
+    "172.64.146.15/32",
+    "172.66.0.243/32"
+)
 
 if (-not (Test-Path $TemplateDisk)) {
     throw "Template disk not found: $TemplateDisk"
@@ -147,6 +157,15 @@ if ($Maintenance) {
         -RemoteIPAddress $ClaudeAPI `
         -Direction Outbound `
         -Action Allow
+	
+    foreach ($Cidr in $CodexAPI) {
+        Add-VMNetworkAdapterAcl `
+            -VMName $Name `
+            -VMNetworkAdapterName $Adapter `
+            -RemoteIPAddress $Cidr `
+            -Direction Outbound `
+            -Action Allow
+    }
 
     Add-VMNetworkAdapterAcl `
         -VMName $Name `

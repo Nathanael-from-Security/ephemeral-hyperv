@@ -2,6 +2,9 @@
 --- Ephemeral VMs ---
 #####################################################
 
+# See running VM
+Get-VM | Where-Object State -eq "Running"
+
 # Create
 C:\VMs\New-ClaudeEphemeral.ps1
 C:\VMs\New-ClaudeEphemeral.ps1 -Name claude-task-001
@@ -16,6 +19,8 @@ vmconnect.exe localhost "claude-ephemeral-20260605-125005"
 cd \\wsl$\Ubuntu\home\nathrais\path\
 git bundle create repo.bundle --all
 scp -i "$env:USERPROFILE\.ssh\claude_sandbox_ed25519" .\repo.bundle user@172.30.101.50:/tmp/
+scp -r -i "$env:USERPROFILE\.ssh\claude_sandbox_ed25519" "\\wsl$\Ubuntu\home\nathrais\tools\sast-plugin\repo.bundle" sandbox@172.30.101.50:/home/sandbox/work/dev/tools/
+
 # Receive repo
 git clone /tmp/repo.bundle repo
 cd repo
@@ -27,8 +32,6 @@ scp -i "$env:USERPROFILE\.ssh\claude_sandbox_ed25519" -r user@172.30.101.50:/tmp
 # Destroy
 C:\VMs\Remove-ClaudeEphemeral.ps1 -Name claude-task-001
 
-# See running VM
-Get-VM | Where-Object State -eq "Running"
 
 # NOTES:
 # - run only one clone at a time, or you will get IP conflicts
@@ -41,12 +44,10 @@ Get-VM | Where-Object State -eq "Running"
 # Host: run from elevated PowerShell
 Set-ExecutionPolicy -Scope Process Bypass
 C:\VMs\Update-ClaudeBase.ps1
+C:\VMs\Update-ClaudeBase.ps1 -Force
 
 # If you do not want vmconnect to open automatically:
 C:\VMs\Update-ClaudeBase.ps1 -NoConnect
-
-# If a VM refuses to stop cleanly:
-C:\VMs\Update-ClaudeBase.ps1 -Force
 
 # Connect after the script starts claude-base
 ssh -i "C:\VMs\ssh\claude_sandbox_ed25519" sandbox@172.30.101.50
