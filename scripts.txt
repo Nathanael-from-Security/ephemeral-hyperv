@@ -34,6 +34,7 @@ C:\VMs\Remove-ClaudeEphemeral.ps1 -Name claude-task-001
 
 
 # NOTES:
+# - New-ClaudeEphemeral.ps1 applies locked ACLs automatically unless -Maintenance is used.
 # - run only one clone at a time, or you will get IP conflicts
 # - keep claude-base powered off while an ephemeral clone is running unless you change the clone’s IP
 
@@ -66,10 +67,10 @@ sudo apt clean
 # systemctl status ssh
 
 # Host: when maintenance is finished, re-lock networking
-C:\VMs\Maintenance-ClaudeBase.ps1 -Mode locked
+C:\VMs\Set-ClaudeVmNetworkMode.ps1 -Mode locked -VMName claude-base
 
 # Host: verify locked ACLs are restored
-C:\VMs\Maintenance-ClaudeBase.ps1 -Mode status
+C:\VMs\Set-ClaudeVmNetworkMode.ps1 -Mode status -VMName claude-base
 
 # Host: shut down claude-base cleanly
 Stop-VM -Name "claude-base"
@@ -98,7 +99,7 @@ Get-Item $template, $source | Select-Object FullName, IsReadOnly
 Get-VM -Name "claude-base"
 Get-Item "C:\VMs\templates\claude-base-template.vhdx" |
     Select-Object FullName, IsReadOnly
-C:\VMs\Maintenance-ClaudeBase.ps1 -Mode status
+C:\VMs\Set-ClaudeVmNetworkMode.ps1 -Mode status -VMName claude-base
 
 
 #####################################################
@@ -108,50 +109,11 @@ C:\VMs\Maintenance-ClaudeBase.ps1 -Mode status
 # ERROR: Hyper-V switch not found: fresh-claude-switch
 # SOLUTION: Run the startup script as admin
 
-# ERROR: Cannot connect to Claude in Sandbox (ex: )
-# SOLUTION: 
-
-#####################################################
-OLD COMMANDS CREATED WHEN I WAS RUNNING A SINGLE VM
-#####################################################
-
---- Check Network ACL controls ---
-
-C:\VMs\ClaudeSandbox.ps1 status
-
-# enter permissive mode
-C:\VMs\ClaudeSandbox.ps1 maintenance
-
-# relock down the ACLs
-C:\VMs\ClaudeSandbox.ps1 locked
-
-
---- Start VM ---
-
-Start-VM -Name "claude-base"
-vmconnect.exe localhost "claude-base"
-
---- Start Squid Proxy ---
-Restart-Service -Name squidsrv
-Get-Service -Name squidsrv
-Get-NetTCPConnection -LocalPort 3128 -State Listen |
-  Select-Object LocalAddress, LocalPort, State, OwningProcess
-  
-  
---- Review Squid Config ---
-$SquidConf = "C:\Squid\etc\squid\squid.conf"
-Get-Content $SquidConf |
-  Where-Object {
-    $_ -match '\S' -and
-    $_ -notmatch '^\s*#'
-  } |
-  Select-String -Pattern '^\s*(acl|http_access|http_port|https_port|always_direct|never_direct|cache_peer|request_header_access|reply_header_access|dns_nameservers|access_log|cache_log|visible_hostname)\b'
-  
-  
---- Test VM connection and connect ---
-
-Test-NetConnection 172.30.101.50 -Port 22
-ssh -i "C:\VMs\ssh\claude_sandbox_ed25519" sandbox@172.30.101.50
-
-
----------------------------------------------
+# ERROR: Cannot connect to Claude in Sandbox
+# SOLUTION:
+# - Check locked ACLs:
+#   C:\VMs\Set-ClaudeVmNetworkMode.ps1 -Mode status -VMName <vm-name>
+# - Temporarily unlock networking:
+#   C:\VMs\Set-ClaudeVmNetworkMode.ps1 -Mode maintenance -VMName <vm-name>
+# - Re-lock when finished:
+#   C:\VMs\Set-ClaudeVmNetworkMode.ps1 -Mode locked -VMName <vm-name>

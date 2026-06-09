@@ -14,16 +14,18 @@ param(
 
 $ErrorActionPreference = "Stop"
 
-$TemplateDisk = "C:\VMs\templates\claude-base-template.vhdx"
-$SwitchName   = "fresh-claude-switch"
-$Root         = "C:\VMs\ephemeral"
-$DiskDir      = "$Root\disks"
-$VmRootDir    = "$Root\vms"
+$TemplateDisk      = "C:\VMs\templates\claude-base-template.vhdx"
+$SwitchName        = "fresh-claude-switch"
+$Root              = "C:\VMs\ephemeral"
+$DiskDir           = "$Root\disks"
+$VmRootDir         = "$Root\vms"
+$NetworkModeScript = "C:\VMs\Set-ClaudeVmNetworkMode.ps1"
 
-# Figure out the host IP to whitelist later
+$SwitchAlias = "vEthernet ($SwitchName)"
+
 $HostIP = (
     Get-NetIPAddress `
-        -InterfaceAlias "vEthernet ($SwitchName)" `
+        -InterfaceAlias $SwitchAlias `
         -AddressFamily IPv4 |
     Where-Object {
         $_.IPAddress -notlike "169.254.*" -and
@@ -33,50 +35,20 @@ $HostIP = (
 )
 
 if ([string]::IsNullOrWhiteSpace($HostIP)) {
-    throw "Could not determine host IP for vEthernet ($SwitchName)"
+    throw "Could not determine host IP for $SwitchAlias"
 }
 
-# Check if the switch has the right IP that is whitelisted
-$SwitchInterfaceAlias = "vEthernet ($SwitchName)"
-
-$ExistingSwitchIP = Get-NetIPAddress `
-    -InterfaceAlias $SwitchInterfaceAlias `
-    -AddressFamily IPv4 `
-    -ErrorAction SilentlyContinue |
-    Where-Object { $_.IPAddress -eq $HostIP }
-
-if (-not $ExistingSwitchIP) {
-    $Command = @"
-New-NetIPAddress ``````
-    -InterfaceAlias "$SwitchInterfaceAlias" ``````
-    -IPAddress $HostIP ``````
-    -PrefixLength 24
-"@
-
-    Write-Host "Your switch $SwitchInterfaceAlias does not have a whitelisted IP."
-    Write-Host "Expected: $HostIP/24"
-    Write-Host ""
-    Write-Host "Run the following in an elevated PowerShell session:"
-    Write-Host $Command
-    Write-Host ""
-
-    throw "Missing required switch IP: $HostIP/24 on $SwitchInterfaceAlias"
+if (-not (Get-NetIPAddress -InterfaceAlias $SwitchAlias -AddressFamily IPv4 -ErrorAction SilentlyContinue |
+    Where-Object { $_.IPAddress -eq $HostIP })) {
+    throw "Missing required switch IP: $HostIP/24 on $SwitchAlias"
 }
-
-# api.anthropic.com
-$ClaudeAPI    = "160.79.104.0/21"
-
-# "api.openai.com",
-# "auth.openai.com"
-$CodexAPI = @(
-    "104.18.41.241/32",
-    "162.159.140.245/32",
-    "172.64.146.15/32",
-    "172.66.0.243/32"
-)
 
 if (-not (Test-Path $TemplateDisk)) {
     throw "Template disk not found: $TemplateDisk"
+}
+
+if (-not (Test-Path $NetworkModeScript)) {
+    throw "Network mode script not found: $NetworkModeScript"
 }
 
 if (-not (Get-VMSwitch -Name $SwitchName -ErrorAction SilentlyContinue)) {
@@ -84,8 +56,7 @@ if (-not (Get-VMSwitch -Name $SwitchName -ErrorAction SilentlyContinue)) {
 }
 
 if ([string]::IsNullOrWhiteSpace($Name)) {
-    $Stamp = Get-Date -Format "yyyyMMdd-HHmmss"
-    $Name = "claude-ephemeral-$Stamp"
+    $Name = "claude-ephemeral-$(Get-Date -Format 'yyyyMMdd-HHmmss')"
 }
 
 if (Get-VM -Name $Name -ErrorAction SilentlyContinue) {
@@ -132,48 +103,9 @@ Set-VMMemory `
     -StartupBytes ($MemoryGB * 1GB) `
     -MaximumBytes 8GB
 
-# Disable checkpoints for ephemeral VMs.
 Set-VM `
     -Name $Name `
     -CheckpointType Disabled
-
-$Adapter = (Get-VMNetworkAdapter -VMName $Name).Name
-
-if ($Maintenance) {
-    Write-Host "Maintenance mode requested: no outbound deny will be applied."
-} else {
-    Write-Host "Applying locked outbound ACL policy..."
-
-    Add-VMNetworkAdapterAcl `
-        -VMName $Name `
-        -VMNetworkAdapterName $Adapter `
-        -RemoteIPAddress "$HostIP/32" `
-        -Direction Outbound `
-        -Action Allow
-
-    Add-VMNetworkAdapterAcl `
-        -VMName $Name `
-        -VMNetworkAdapterName $Adapter `
-        -RemoteIPAddress $ClaudeAPI `
-        -Direction Outbound `
-        -Action Allow
-	
-    foreach ($Cidr in $CodexAPI) {
-        Add-VMNetworkAdapterAcl `
-            -VMName $Name `
-            -VMNetworkAdapterName $Adapter `
-            -RemoteIPAddress $Cidr `
-            -Direction Outbound `
-            -Action Allow
-    }
-
-    Add-VMNetworkAdapterAcl `
-        -VMName $Name `
-        -VMNetworkAdapterName $Adapter `
-        -RemoteIPAddress "0.0.0.0/0" `
-        -Direction Outbound `
-        -Action Deny
-}
 
 Set-VMFirmware `
     -VMName $Name `
@@ -185,6 +117,21 @@ $BootDisk = Get-VMHardDiskDrive -VMName $Name
 Set-VMFirmware `
     -VMName $Name `
     -FirstBootDevice $BootDisk
+
+$Adapter = (Get-VMNetworkAdapter -VMName $Name).Name
+
+if ($Maintenance) {
+    Write-Host "Maintenance mode requested: no outbound deny will be applied."
+}
+else {
+    Write-Host "Applying locked outbound ACL policy..."
+
+    & $NetworkModeScript `
+        -Mode locked `
+        -VMName $Name `
+        -AdapterName $Adapter `
+        -SwitchName $SwitchName
+}
 
 Start-VM -Name $Name
 
