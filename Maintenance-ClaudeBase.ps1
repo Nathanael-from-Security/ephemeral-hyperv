@@ -7,7 +7,16 @@ param(
 $VM        = "claude-base"
 $Adapter   = "fresh-claude-adapter"
 $HostIP    = "172.30.101.1"
+# api.anthropic.com
 $ClaudeAPI = "160.79.104.0/21"
+# "api.openai.com",
+# "auth.openai.com"
+$CodexAPI = @(
+    "104.18.41.241/32",
+    "162.159.140.245/32",
+    "172.64.146.15/32",
+    "172.66.0.243/32"
+)
 
 function Remove-Rule {
     param(
@@ -70,6 +79,15 @@ if ($Mode -eq "locked") {
         -Direction Outbound `
         -Action Allow
 
+    foreach ($Cidr in $CodexAPI) {
+        Add-VMNetworkAdapterAcl `
+            -VMName $VM `
+            -VMNetworkAdapterName $Adapter `
+            -RemoteIPAddress $Cidr `
+            -Direction Outbound `
+            -Action Allow
+    }
+	
     Add-VMNetworkAdapterAcl `
         -VMName $VM `
         -VMNetworkAdapterName $Adapter `
@@ -78,7 +96,7 @@ if ($Mode -eq "locked") {
         -Action Deny
 
     Write-Host ""
-    Write-Host "Locked mode active. VM outbound is limited to host + Claude API range."
+    Write-Host "Locked mode active. VM outbound is limited to host + Claude/Codex API range."
     Write-Host ""
 
     Show-Rules

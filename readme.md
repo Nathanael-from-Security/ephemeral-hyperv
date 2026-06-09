@@ -751,6 +751,36 @@ This does not add inbound ACLs. SSH from the Windows host can continue to work, 
 
 ---
 
+### Add Whitelisted AI Provider IP
+
+When adding or changing whitelisted provider IPs, update all three places together so locked-mode networking remains consistent:
+
+1. **New ephemeral VM script**: update the provider allowlist used when creating locked ephemeral VMs, for example `New-ClaudeEphemeral.ps1`.
+2. **Maintenance/lock script**: update the same allowlist in the maintenance toggle script, for example `ClaudeSandbox.ps1`, so `locked` mode restores the correct ACLs.
+3. **Linux `/etc/hosts` file**: update pinned hostnames inside the base VM when locked mode blocks normal outbound DNS.
+4. **Display Provider Warnings**: update `/etc/profile.d` for warnings that should appear for all interactive login shell users. 
+
+For Codex/OpenAI API-only access, only pin and allow the required API/auth hostnames, for example:
+
+```text
+api.openai.com
+auth.openai.com
+```
+
+Do not add `chatgpt.com` or `platform.openai.com` unless the VM is expected to use browser-based ChatGPT sign-in, installer downloads, or dashboard access.
+
+After updating IPs, validate from inside the VM:
+
+```bash
+getent hosts api.openai.com
+getent hosts auth.openai.com
+curl -4 -Iv https://api.openai.com
+curl -4 -Iv https://auth.openai.com/api/accounts/deviceauth/usercode
+```
+
+A `400`, `401`, `403`, or `405` response means TCP/TLS connectivity is working. A timeout, DNS failure, or TLS failure means the allowlist, ACL, or `/etc/hosts` entries need correction.
+
+
 ## 18. Add a Maintenance Mode Toggle
 
 Create a host-side script:
