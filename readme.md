@@ -753,12 +753,13 @@ This does not add inbound ACLs. SSH from the Windows host can continue to work, 
 
 ### Add Whitelisted AI Provider IP
 
-When adding or changing whitelisted provider IPs, update all three places together so locked-mode networking remains consistent:
+When adding or changing whitelisted provider IPs, update these places together so locked-mode networking remains consistent:
 
-1. **New ephemeral VM script**: update the provider allowlist used when creating locked ephemeral VMs, for example `New-ClaudeEphemeral.ps1`.
-2. **Maintenance/lock script**: update the same allowlist in the maintenance toggle script, for example `ClaudeSandbox.ps1`, so `locked` mode restores the correct ACLs.
-3. **Linux `/etc/hosts` file**: update pinned hostnames inside the base VM when locked mode blocks normal outbound DNS.
-4. **Display Provider Warnings**: update `/etc/profile.d` for warnings that should appear for all interactive login shell users. 
+1. **Lock script allowlist**: update the `$Allowlist` array near the top of `C:\VMs\Set-ClaudeVMNetworkMode.ps1`. This is the only definition of the locked-mode allowlist. `New-ClaudeEphemeral.ps1` calls that script rather than keeping its own copy, so ephemeral VMs pick the change up automatically.
+2. **Linux `/etc/hosts` file**: update pinned hostnames inside the base VM when locked mode blocks normal outbound DNS.
+3. **Display Provider Warnings**: update `/etc/profile.d` for warnings that should appear for all interactive login shell users.
+
+Be careful pinning single addresses for CDN-fronted services. Hosts behind Cloudflare, Fastly, or similar providers resolve to rotating anycast addresses, so a `/32` that works today can stop being the answer returned by DNS later. Prefer the provider's published range, or accept that such entries need periodic re-checking.
 
 For Codex/OpenAI API-only access, only pin and allow the required API/auth hostnames, for example:
 
@@ -781,149 +782,78 @@ curl -4 -Iv https://auth.openai.com/api/accounts/deviceauth/usercode
 A `400`, `401`, `403`, or `405` response means TCP/TLS connectivity is working. A timeout, DNS failure, or TLS failure means the allowlist, ACL, or `/etc/hosts` entries need correction.
 
 
-## 18. Add a Maintenance Mode Toggle
+## 18. Maintenance Mode Toggle
 
-Create a host-side script:
+Locked and maintenance modes are toggled by `C:\VMs\Set-ClaudeVMNetworkMode.ps1`. It is the single source of truth for the locked-mode allowlist and is used both by this workflow and by `New-ClaudeEphemeral.ps1` when it applies ACLs to a new clone.
 
-```powershell
-notepad C:\VMs\ClaudeSandbox.ps1
-```
+Parameters:
 
-Paste:
+| Parameter | Default | Purpose |
+| --- | --- | --- |
+| `-Mode` | required | `locked`, `maintenance`, or `status` |
+| `-VMName` | `claude-base` | VM whose adapter ACLs are changed |
+| `-AdapterName` | auto-detected | resolved from the VM when not supplied |
+| `-SwitchName` | `fresh-claude-switch` | used to resolve the host-side IP |
 
-```powershell
-param(
-    [Parameter(Mandatory = $true)]
-    [ValidateSet("locked", "maintenance", "status")]
-    [string]$Mode
-)
+Behaviour:
 
-$VM        = "claude-base"
-$Adapter   = "fresh-claude-adapter"
-$HostIP    = "172.30.101.1"
-$ClaudeAPI = "160.79.104.0/21"
+* `maintenance` removes only the outbound `0.0.0.0/0` deny rule. The allow rules stay in place and the VM regains general outbound internet access.
+* `locked` re-applies every entry in the `$Allowlist` array, then re-applies the outbound `0.0.0.0/0` deny.
+* `status` prints the current ACLs and changes nothing.
 
-function Remove-Rule {
-    param(
-        [string]$RemoteIPAddress,
-        [string]$Direction,
-        [string]$Action
-    )
-
-    Remove-VMNetworkAdapterAcl `
-        -VMName $VM `
-        -VMNetworkAdapterName $Adapter `
-        -RemoteIPAddress $RemoteIPAddress `
-        -Direction $Direction `
-        -Action $Action `
-        -ErrorAction SilentlyContinue
-}
-
-function Show-Rules {
-    Get-VMNetworkAdapterAcl `
-        -VMName $VM `
-        -VMNetworkAdapterName $Adapter
-}
-
-if ($Mode -eq "maintenance") {
-    Write-Host "Entering maintenance mode: removing default outbound deny..."
-
-    Remove-Rule -RemoteIPAddress "0.0.0.0/0" -Direction Outbound -Action Deny
-
-    Write-Host ""
-    Write-Host "Maintenance mode active. VM can use general outbound internet."
-    Write-Host "Run this when finished:"
-    Write-Host "  C:\VMs\ClaudeSandbox.ps1 locked"
-    Write-Host ""
-
-    Show-Rules
-    exit
-}
-
-if ($Mode -eq "locked") {
-    Write-Host "Restoring locked mode..."
-
-    Remove-Rule -RemoteIPAddress "$HostIP/32" -Direction Outbound -Action Allow
-    Remove-Rule -RemoteIPAddress $HostIP      -Direction Outbound -Action Allow
-    Remove-Rule -RemoteIPAddress $ClaudeAPI   -Direction Outbound -Action Allow
-    Remove-Rule -RemoteIPAddress "0.0.0.0/0"  -Direction Outbound -Action Deny
-
-    Add-VMNetworkAdapterAcl `
-        -VMName $VM `
-        -VMNetworkAdapterName $Adapter `
-        -RemoteIPAddress "$HostIP/32" `
-        -Direction Outbound `
-        -Action Allow
-
-    Add-VMNetworkAdapterAcl `
-        -VMName $VM `
-        -VMNetworkAdapterName $Adapter `
-        -RemoteIPAddress $ClaudeAPI `
-        -Direction Outbound `
-        -Action Allow
-
-    Add-VMNetworkAdapterAcl `
-        -VMName $VM `
-        -VMNetworkAdapterName $Adapter `
-        -RemoteIPAddress "0.0.0.0/0" `
-        -Direction Outbound `
-        -Action Deny
-
-    Write-Host ""
-    Write-Host "Locked mode active. VM outbound is limited to host + Claude API range."
-    Write-Host ""
-
-    Show-Rules
-    exit
-}
-
-if ($Mode -eq "status") {
-    Show-Rules
-    exit
-}
-```
+The host IP is resolved at runtime from `vEthernet (fresh-claude-switch)` rather than hardcoded. Provider entries are hardcoded in the `$Allowlist` array near the top of the script.
 
 Use it from elevated PowerShell:
 
 ```powershell
-C:\VMs\ClaudeSandbox.ps1 status
-C:\VMs\ClaudeSandbox.ps1 maintenance
-C:\VMs\ClaudeSandbox.ps1 locked
+C:\VMs\Set-ClaudeVMNetworkMode.ps1 -Mode status -VMName claude-base
+C:\VMs\Set-ClaudeVMNetworkMode.ps1 -Mode maintenance -VMName claude-base
+C:\VMs\Set-ClaudeVMNetworkMode.ps1 -Mode locked -VMName claude-base
 ```
 
 If PowerShell blocks execution:
 
 ```powershell
-powershell.exe -ExecutionPolicy Bypass -File C:\VMs\ClaudeSandbox.ps1 status
+powershell.exe -ExecutionPolicy Bypass -File C:\VMs\Set-ClaudeVMNetworkMode.ps1 -Mode status
 ```
+
+`Set-ExecutionPolicy -Scope Process Bypass` must be run in the calling session before the script is invoked. It cannot be placed inside the script, because the execution policy is evaluated before the file is parsed.
 
 ---
 
 ## 19. Maintenance Workflow for the Base VM
 
-Run package updates on the base VM, then rebuild the read-only template disk.
+Run updates on the base VM, then rebuild the read-only template disk so new clones inherit the changes.
 
 Do not update an ephemeral VM if you want the update to persist. Ephemeral VM changes are discarded when the VM is destroyed.
 
-Recommended workflow:
+`C:\VMs\Update-ClaudeBase.ps1` automates the preparation half only. It stops running ephemeral VMs, stops the base VM, clears the read-only attribute on the base and template disks, starts the base VM, switches it to maintenance networking, and opens `vmconnect`. It does not update anything inside the VM, does not re-lock networking, does not destroy ephemeral VMs, and does not rebuild the template. Those steps are manual and are listed below and in the script's own closing output.
 
-1. Make sure no ephemeral VM is running.
-2. Start `claude-base`.
-3. Put `claude-base` into maintenance mode.
-4. Run updates inside `claude-base`.
-5. Re-lock `claude-base`.
-6. Shut down `claude-base`.
-7. Recreate `C:\VMs\templates\claude-base-template.vhdx`.
-8. Mark the template read-only again.
+Full cycle:
 
-Host commands:
+1. Prepare the base VM with `Update-ClaudeBase.ps1`.
+2. Confirm maintenance networking is active.
+3. Run updates inside `claude-base`.
+4. Re-lock `claude-base`.
+5. Shut down `claude-base` and wait for `Off`.
+6. Destroy every ephemeral VM.
+7. Rebuild `C:\VMs\templates\claude-base-template.vhdx` and mark it read-only.
+
+Host, prepare the base VM:
 
 ```powershell
-Get-VM | Where-Object Name -like "claude-ephemeral-*"
+Set-ExecutionPolicy -Scope Process Bypass
 
-Start-VM -Name "claude-base"
+C:\VMs\Update-ClaudeBase.ps1
+C:\VMs\Update-ClaudeBase.ps1 -Force
+C:\VMs\Update-ClaudeBase.ps1 -NoConnect
+```
 
-C:\VMs\ClaudeSandbox.ps1 maintenance
+Host, confirm maintenance networking before connecting. There must be no `0.0.0.0/0 Deny` row. If there is, apply the mode manually:
+
+```powershell
+C:\VMs\Set-ClaudeVMNetworkMode.ps1 -Mode status -VMName claude-base
+C:\VMs\Set-ClaudeVMNetworkMode.ps1 -Mode maintenance -VMName claude-base
 ```
 
 Inside `claude-base`:
@@ -931,19 +861,39 @@ Inside `claude-base`:
 ```bash
 sudo apt update
 sudo apt upgrade -y
-sudo npm update -g @anthropic-ai/claude-code
+sudo apt autoremove -y
+sudo apt clean
+
+# Claude Code is a root-owned npm global install (section 13).
+# Pin the version so the image is reproducible.
+sudo npm install -g @anthropic-ai/claude-code@2.1.258
 claude --version
 ```
 
-Host commands:
+Host, re-lock and shut down:
 
 ```powershell
-C:\VMs\ClaudeSandbox.ps1 locked
+C:\VMs\Set-ClaudeVMNetworkMode.ps1 -Mode locked -VMName claude-base
+C:\VMs\Set-ClaudeVMNetworkMode.ps1 -Mode status -VMName claude-base
 
 Stop-VM -Name "claude-base"
+
+while ((Get-VM -Name "claude-base").State -ne "Off") {
+    Start-Sleep -Seconds 2
+}
 ```
 
-Rebuild the template disk:
+Host, destroy ephemeral VMs before rebuilding the template. Their differencing disks are parented to the template file, so replacing it breaks the parent linkage and leaves those VMs unbootable. `Update-ClaudeBase.ps1` only stops them, it does not remove them:
+
+```powershell
+Get-VM | Where-Object Name -like "claude-ephemeral-*"
+
+Get-VM | Where-Object Name -like "claude-ephemeral-*" | ForEach-Object {
+    C:\VMs\Remove-ClaudeEphemeral.ps1 -Name $_.Name
+}
+```
+
+Host, rebuild the template disk. Skipping this step leaves every new clone on the previous image:
 
 ```powershell
 $template = "C:\VMs\templates\claude-base-template.vhdx"
@@ -957,6 +907,15 @@ if (Test-Path $template) {
 Copy-Item $source $template
 
 Set-ItemProperty -Path $template -Name IsReadOnly -Value $true
+```
+
+Host, final sanity checks:
+
+```powershell
+Get-Item $template, $source | Select-Object FullName, IsReadOnly
+Get-VM -Name "claude-base"
+Get-VM | Where-Object Name -like "claude-ephemeral-*"
+C:\VMs\Set-ClaudeVMNetworkMode.ps1 -Mode status -VMName claude-base
 ```
 
 ---
@@ -1498,7 +1457,7 @@ At the end of this setup:
 * Claude hostnames are pinned in `/etc/hosts`.
 * The VM can reach Claude/Anthropic endpoints in `160.79.104.0/21`.
 * The VM cannot reach general internet destinations in locked mode.
-* `C:\VMs\ClaudeSandbox.ps1` toggles locked and maintenance modes.
+* `C:\VMs\Set-ClaudeVMNetworkMode.ps1` toggles locked and maintenance modes.
 * `C:\VMs\templates\claude-base-template.vhdx` is the read-only template disk.
 * Ephemeral VMs can be created from the template and destroyed after use.
 * Claude Code runs as a non-root sandbox user.
