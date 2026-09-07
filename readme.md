@@ -614,6 +614,7 @@ On the Windows host, resolve the current IP:
 Resolve-DnsName api.anthropic.com -Type A
 Resolve-DnsName platform.claude.com -Type A
 Resolve-DnsName claude.ai -Type A
+Resolve-DnsName mcp-proxy.anthropic.com -Type A
 ```
 
 In the VM, edit `/etc/hosts`:
@@ -628,7 +629,10 @@ Add the resolved IP for all required Claude hostnames:
 160.79.104.10 api.anthropic.com
 160.79.104.10 platform.claude.com
 160.79.104.10 claude.ai
+160.79.104.10 mcp-proxy.anthropic.com
 ```
+
+`mcp-proxy.anthropic.com` is required for MCP connectors managed on your Claude account. Those connectors do **not** connect to the provider directly, they are proxied through Anthropic. Without this pin, locked mode leaves the hostname unresolvable, DNS stalls against a blocked port 53, and the client reports `Version negotiation probe timed out after 5000ms` rather than an obvious network error.
 
 Use the IP returned by DNS. The example above uses `160.79.104.10`.
 
@@ -638,6 +642,7 @@ Verify:
 getent hosts api.anthropic.com
 getent hosts platform.claude.com
 getent hosts claude.ai
+getent hosts mcp-proxy.anthropic.com
 ```
 
 Test direct connectivity without a proxy:
@@ -1257,6 +1262,7 @@ Confirm hostnames resolve through `/etc/hosts`:
 getent hosts api.anthropic.com
 getent hosts platform.claude.com
 getent hosts claude.ai
+getent hosts mcp-proxy.anthropic.com
 ```
 
 Run Claude Code:
@@ -1381,6 +1387,7 @@ Check Claude hostname resolution:
 getent hosts api.anthropic.com
 getent hosts platform.claude.com
 getent hosts claude.ai
+getent hosts mcp-proxy.anthropic.com
 ```
 
 Check Claude API connectivity:

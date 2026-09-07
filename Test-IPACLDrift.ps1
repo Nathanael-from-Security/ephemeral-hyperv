@@ -58,7 +58,14 @@ $ErrorActionPreference = "Stop"
 $Providers = [ordered]@{
     claude = @{
         Label     = "Claude / Anthropic"
-        Hostnames = @("api.anthropic.com", "platform.claude.com", "claude.ai")
+        Hostnames = @(
+            "api.anthropic.com",
+            "platform.claude.com",
+            "claude.ai",
+            # Managed MCP connectors are proxied through Anthropic rather than
+            # connecting to the provider directly, so this must resolve too.
+            "mcp-proxy.anthropic.com"
+        )
         Feed      = $null
         Note      = ""
     }
