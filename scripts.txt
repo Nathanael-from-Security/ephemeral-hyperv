@@ -50,7 +50,7 @@ C:\VMs\Remove-ClaudeEphemeral.ps1 -Name claude-task-001
 ## MAINTENANCE MODE START ##
 # Host: run from elevated PowerShell
 Set-ExecutionPolicy -Scope Process Bypass
-C:\VMs\Update-ClaudeBase.ps1 -Force -NoConnect
+C:\VMs\Update-ClaudeBase.ps1 -Force -NoConnect -AutoUpdateGuest
 
 # Host: same, but also update the guest automatically over SSH.
 # -AutoUpdateGuest waits for port 22, then runs ONE sudo session that does:
@@ -61,7 +61,6 @@ C:\VMs\Update-ClaudeBase.ps1 -Force -NoConnect
 #   - prints claude and codex versions
 # It logs in as 'user' and sudo prompts once, interactively.
 # No password is stored in the script or on disk.
-C:\VMs\Update-ClaudeBase.ps1 -Force -NoConnect -AutoUpdateGuest
 
 # Relevant defaults, override only if something has moved:
 #   -BaseVmIp           172.30.101.50

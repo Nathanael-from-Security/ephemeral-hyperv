@@ -493,7 +493,7 @@ ssh -i "$env:USERPROFILE\.ssh\ai-sandbox-ed25519" sandbox@172.30.101.50
 
 ---
 
-## 13. Install Claude Code CLI
+## 13. Install the Agent CLIs
 
 Install prerequisites while the VM still has temporary unrestricted outbound access:
 
@@ -502,24 +502,53 @@ sudo apt update
 sudo apt install -y curl ca-certificates gnupg git nodejs npm
 ```
 
-Install Claude Code CLI:
+The two CLIs are installed differently, and the maintenance workflow in section 19 depends on that difference:
+
+* **Claude Code** is a root-owned npm global, available to every account in the VM.
+* **Codex** is installed under the `sandbox` user's own npm prefix, so it exists only for that account.
+
+### Claude Code
+
+Install a pinned version so the image is reproducible:
 
 ```bash
-sudo npm install -g @anthropic-ai/claude-code
-```
-
-Verify:
-
-```bash
+sudo npm install -g @anthropic-ai/claude-code@2.1.258
 claude --version
 ```
+
+### Codex
+
+`npm install -g` as a non-root user writes to a user-level prefix, so give `sandbox` one and put it on the path before installing:
+
+```bash
+sudo -u sandbox -H bash -lc 'mkdir -p ~/.npm-global && npm config set prefix ~/.npm-global'
+sudo -u sandbox -H bash -lc 'grep -q ".npm-global/bin" ~/.profile || echo "export PATH=\"\$HOME/.npm-global/bin:\$PATH\"" >> ~/.profile'
+```
+
+Install and verify:
+
+```bash
+sudo -u sandbox -H bash -lc 'npm install -g @openai/codex'
+sudo -u sandbox -H bash -lc 'codex --version'
+```
+
+If `codex --version` reports command not found, the prefix is not on the path for that login shell. Re-check `~/.profile` and confirm `bash -lc` is being used, since a non-login shell will not read it.
+
+### Authentication
 
 Run initial authentication or setup as the sandbox user:
 
 ```bash
 su - sandbox
 claude
+codex
 ```
+
+Codex sign-in requires the OpenAI endpoints to be reachable. In locked mode they are not, unless they have been added to the allowlist and pinned in `/etc/hosts`. See section 17.
+
+### Auto-update behaviour
+
+Locked clones cannot reach the npm registry, so a CLI's own auto-updater can only produce failing background calls. Pinning versions here and updating through the section 19 maintenance cycle keeps the image content deliberate. Set `DISABLE_AUTOUPDATER=1` in the environment if you want to suppress those attempts entirely.
 
 ---
 
