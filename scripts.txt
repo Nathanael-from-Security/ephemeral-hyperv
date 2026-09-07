@@ -72,6 +72,16 @@ C:\VMs\Update-ClaudeBase.ps1 -Force -NoConnect -AutoUpdateGuest
 #   -SshTimeoutSeconds  180
 C:\VMs\Update-ClaudeBase.ps1 -AutoUpdateGuest -ClaudeCodeVersion 2.1.263
 
+# NOTE: claude_sandbox_ed25519 has a passphrase. Load it into the agent once
+# per Windows session, otherwise every SSH/SCP call in the run prompts for it:
+Start-Service ssh-agent
+ssh-add "C:\VMs\ssh\claude_sandbox_ed25519"
+ssh-add -l
+
+# NOTE: never pass -o BatchMode=yes with this key. BatchMode forbids all
+# prompts, so the passphrase cannot be entered and ssh fails with
+# "Permission denied (publickey,password)", which looks like a wrong account.
+
 # NOTE: the SharedFolder copy overwrites same-named files in /home/sandbox.
 # The run prints "OVERWRITING:" or "adding:" per path before it copies.
 

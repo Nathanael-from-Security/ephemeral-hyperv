@@ -126,6 +126,26 @@ function Wait-ForSsh {
     throw "SSH did not become available on $IpAddress within $TimeoutSeconds seconds."
 }
 
+function Test-SshAgentKey {
+    if (-not (Get-Command ssh-add.exe -ErrorAction SilentlyContinue)) {
+        Write-Warn "ssh-add.exe not found. Cannot check for a loaded agent key."
+        return
+    }
+
+    & ssh-add.exe -l 2>&1 | Out-Null
+
+    if ($LASTEXITCODE -eq 0) {
+        Write-Ok "SSH agent has a key loaded. No passphrase prompts expected."
+        return
+    }
+
+    Write-Warn "No key is loaded in the SSH agent."
+    Write-Warn "If $SshKeyPath has a passphrase, you will be prompted for it on each of the"
+    Write-Warn "four SSH/SCP calls in this run. To be prompted once instead, cancel and run:"
+    Write-Warn "    Start-Service ssh-agent"
+    Write-Warn "    ssh-add `"$SshKeyPath`""
+}
+
 function Invoke-Ssh {
     param(
         [Parameter(Mandatory)]
@@ -142,9 +162,6 @@ function Invoke-Ssh {
 
     if ($Interactive) {
         $baseArgs += "-t"
-    }
-    else {
-        $baseArgs += @("-o", "BatchMode=yes")
     }
 
     $allArgs = $baseArgs + @("$SshUser@$BaseVmIp") + $SshArgument
@@ -169,7 +186,6 @@ function Copy-ToGuest {
         "-r",
         "-i", $SshKeyPath,
         "-o", "StrictHostKeyChecking=accept-new",
-        "-o", "BatchMode=yes",
         "-o", "ConnectTimeout=10"
     ) + $Path + @("${SshUser}@${BaseVmIp}:${Destination}")
 
@@ -360,6 +376,8 @@ if ($maintenanceNetworkingApplied) {
 if ($AutoUpdateGuest) {
     Write-Step "Updating the guest over SSH..."
 
+    Test-SshAgentKey
+
     Wait-ForSsh -IpAddress $BaseVmIp -TimeoutSeconds $SshTimeoutSeconds
 
     $staging = "/tmp/claude-base-staging"
@@ -391,6 +409,10 @@ if ($AutoUpdateGuest) {
     $remoteScript = @'
 #!/usr/bin/env bash
 set -euo pipefail
+
+# Remove this script on exit. bash already holds the file open, so the
+# unlink is safe and avoids a second SSH call just to clean up.
+trap 'rm -f /tmp/claude-base-maint.sh' EXIT
 
 SANDBOX_USER="__SANDBOX_USER__"
 SANDBOX_HOME="/home/__SANDBOX_USER__"

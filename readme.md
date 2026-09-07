@@ -917,6 +917,15 @@ Relevant parameters:
 Notes and limitations:
 
 * `sudo` prompts once for the password of `-SshUser`, interactively, because the whole guest update runs in one `ssh -t` session. No password is stored in the script, in a file, or in the environment. For genuinely unattended runs, add a scoped `NOPASSWD` rule in `/etc/sudoers.d/` for the specific commands rather than storing a secret.
+* `claude_sandbox_ed25519` is passphrase-protected. Load it into the Windows SSH agent once per session, or each of the four SSH and SCP calls in the run will prompt separately:
+
+```powershell
+Start-Service ssh-agent
+ssh-add "C:\VMs\ssh\claude_sandbox_ed25519"
+ssh-add -l
+```
+
+* Do not add `-o BatchMode=yes` to any command using this key. BatchMode forbids interactive prompts, so the passphrase cannot be supplied and ssh fails with `Permission denied (publickey,password)` — which reads like a wrong account or a missing key rather than a suppressed prompt.
 * The shared folder copy overwrites same-named files in `/home/sandbox`, including dotfiles. Each path is printed as `OVERWRITING:` or `adding:` before the copy runs.
 * Maintenance networking must be active first. If the network toggle script cannot be found, `Update-ClaudeBase.ps1` warns rather than throwing, and the guest update will then fail at the first `apt-get` fetch.
 * `-WhatIf` covers the `sudo` session only. Staging directory creation and the SCP uploads still execute.
