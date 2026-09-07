@@ -534,29 +534,37 @@ if (-not $NoConnect) {
 Write-Host ""
 Write-Ok "Base image is ready for maintenance."
 Write-Host ""
-Write-Host "After updating the base VM, shut it down cleanly, re-lock networking, and rebuild the template:"
+# Every command below is printed flush left and on a single line so it can be
+# pasted straight into the console. Leading indentation and multi-line blocks
+# do not survive a paste into PowerShell, so do not "tidy" this output.
+Write-Host "After updating the base VM, shut it down cleanly, re-lock networking, and rebuild the template."
+Write-Host "Each line below can be pasted as-is."
 Write-Host ""
-Write-Host ('    Stop-VM -Name "{0}"' -f $BaseVmName)
-Write-Host ('    while ((Get-VM -Name "{0}").State -ne "Off") {{ Start-Sleep -Seconds 2 }}' -f $BaseVmName)
-Write-Host ('    & "{0}" -Mode locked' -f $NetworkScriptPath)
+Write-Host "--- 1. Shut down and re-lock ---"
 Write-Host ""
-Write-Host "Destroy every ephemeral VM before rebuilding the template. Their"
-Write-Host "differencing disks are parented to the template file, so replacing it"
-Write-Host "breaks the parent linkage and leaves those VMs unbootable:"
+Write-Host ('Stop-VM -Name "{0}"' -f $BaseVmName)
+Write-Host ('while ((Get-VM -Name "{0}").State -ne "Off") {{ Start-Sleep -Seconds 2 }}' -f $BaseVmName)
+Write-Host ('& "{0}" -Mode locked' -f $NetworkScriptPath)
 Write-Host ""
-Write-Host ('    Get-VM | Where-Object Name -like "{0}"' -f $EphemeralVmNamePattern)
+Write-Host "Add -Atlassian to that last line if this VM needs Jira access. Locked mode"
+Write-Host "removes any allow rule it does not own, so re-locking without the switch"
+Write-Host "revokes Atlassian access."
 Write-Host ""
-Write-Host ('    Get-VM | Where-Object Name -like "{0}" | ForEach-Object {{' -f $EphemeralVmNamePattern)
-Write-Host ('        & "{0}" -Name $_.Name' -f $RemoveEphemeralScriptPath)
-Write-Host '    }'
+Write-Host "--- 2. Destroy ephemeral VMs ---"
 Write-Host ""
-Write-Host "Then rebuild the read-only template disk:"
+Write-Host "Their differencing disks are parented to the template file, so replacing it"
+Write-Host "breaks the parent linkage and leaves those VMs unbootable. List them first:"
 Write-Host ""
-Write-Host ('    $template = "{0}"' -f $TemplateVhdPath)
-Write-Host ('    $source   = "{0}"' -f $BaseVhdPath)
-Write-Host '    if (Test-Path $template) {'
-Write-Host '        Set-ItemProperty -Path $template -Name IsReadOnly -Value $false'
-Write-Host '        Remove-Item $template -Force'
-Write-Host '    }'
-Write-Host '    Copy-Item $source $template'
-Write-Host '    Set-ItemProperty -Path $template -Name IsReadOnly -Value $true'
+Write-Host ('Get-VM | Where-Object Name -like "{0}"' -f $EphemeralVmNamePattern)
+Write-Host ""
+Write-Host "Then destroy them:"
+Write-Host ""
+Write-Host ('Get-VM | Where-Object Name -like "{0}" | ForEach-Object {{ & "{1}" -Name $_.Name }}' -f $EphemeralVmNamePattern, $RemoveEphemeralScriptPath)
+Write-Host ""
+Write-Host "--- 3. Rebuild the read-only template disk ---"
+Write-Host ""
+Write-Host ('$template = "{0}"' -f $TemplateVhdPath)
+Write-Host ('$source = "{0}"' -f $BaseVhdPath)
+Write-Host 'if (Test-Path $template) { Set-ItemProperty -Path $template -Name IsReadOnly -Value $false; Remove-Item $template -Force }'
+Write-Host 'Copy-Item $source $template'
+Write-Host 'Set-ItemProperty -Path $template -Name IsReadOnly -Value $true'
