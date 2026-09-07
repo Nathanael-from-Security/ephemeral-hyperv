@@ -650,6 +650,39 @@ curl -v --noproxy '*' --connect-timeout 10 https://claude.ai/
 
 A `401`, `403`, or `404` response is acceptable. The important result is that TCP/TLS connectivity succeeds.
 
+### Pin Atlassian Hostnames
+
+Only needed when the VM is locked with `-Atlassian` (section 17). Resolve each hostname **separately** on the Windows host during a maintenance window:
+
+```powershell
+Resolve-DnsName mcp.atlassian.com   -Type A
+Resolve-DnsName api.atlassian.com   -Type A
+Resolve-DnsName id.atlassian.com    -Type A
+Resolve-DnsName auth.atlassian.com  -Type A
+Resolve-DnsName <site>.atlassian.net -Type A
+```
+
+Do not reuse one address across all five. `mcp.atlassian.com` answers from Atlassian's own network (`104.192.136.0/21`), while `api.atlassian.com` and `*.atlassian.net` answer from CloudFront (`13.227.180.0/24`). They are different pools.
+
+Add the resolved addresses to `/etc/hosts` in the VM:
+
+```text
+104.192.143.12 mcp.atlassian.com
+13.227.180.4   api.atlassian.com
+13.227.180.4   id.atlassian.com
+13.227.180.4   auth.atlassian.com
+13.227.180.4   <site>.atlassian.net
+```
+
+The addresses above are examples. Use whatever DNS returns, and confirm each one falls inside an allowlisted range by running `Test-IPACLDrift.ps1` on the host (section 17).
+
+Verify:
+
+```bash
+getent hosts mcp.atlassian.com
+curl -v --noproxy '*' --connect-timeout 10 https://mcp.atlassian.com/
+```
+
 ---
 
 ## 16. Add a Login Connectivity Warning
@@ -817,6 +850,56 @@ curl -4 -Iv https://auth.openai.com/api/accounts/deviceauth/usercode
 
 A `400`, `401`, `403`, or `405` response means TCP/TLS connectivity is working. A timeout, DNS failure, or TLS failure means the allowlist, ACL, or `/etc/hosts` entries need correction.
 
+---
+
+### Atlassian Cloud Access
+
+Atlassian access is **off by default**. It is enabled per lock with the `-Atlassian` switch:
+
+```powershell
+C:\VMs\Set-ClaudeVMNetworkMode.ps1 -Mode locked -VMName claude-base -Atlassian
+```
+
+Turn it back off by locking without the switch. Locked mode removes any outbound allow rule that is not in the current desired set, so the Atlassian rules disappear on the next plain lock:
+
+```powershell
+C:\VMs\Set-ClaudeVMNetworkMode.ps1 -Mode locked -VMName claude-base
+```
+
+The ranges live in the `$AtlassianAllowlist` array in `Set-ClaudeVMNetworkMode.ps1`. They are Atlassian's published `ingress` ranges filtered to the commercial perimeter, product `jira`, IPv4 only, then collapsed to supernets. Eight CIDRs, roughly 7,500 addresses. Unlike the Codex `/32` entries these are Atlassian-operated space rather than shared CDN space.
+
+Enabling this also requires the `/etc/hosts` pins from section 15, because locked mode blocks DNS. The ACL change on its own is not enough.
+
+---
+
+### Check for IP Drift
+
+`C:\VMs\Test-IPACLDrift.ps1` reports where the applied ACLs no longer cover the addresses a provider actually resolves to. It is read-only: it never changes an ACL, a VM, or the guest.
+
+```powershell
+C:\VMs\Test-IPACLDrift.ps1 -VMName claude-base -AtlassianSite <site>
+```
+
+| Parameter | Default | Purpose |
+| --- | --- | --- |
+| `-Provider` | `all` | `claude`, `codex`, `atlassian`, or `all` |
+| `-VMName` | `claude-base` | VM whose ACLs are read |
+| `-AdapterName` | auto-detected | resolved from the VM when not supplied |
+| `-DnsSamples` | `3` | DNS queries per hostname, to sample rotating pools |
+| `-AtlassianSite` | none | adds `<site>.atlassian.net` to the Atlassian checks |
+| `-FailOnDrift` | off | exit code 1 when drift is found, for scheduled runs |
+
+Two checks run per provider:
+
+* **DNS coverage**, for all three providers. Every address a provider hostname resolves to is tested against the union of the VM's outbound allow rules. An uncovered address is drift: pin it in `/etc/hosts` and the guest would still be blocked.
+* **Feed coverage**, for Atlassian only. Atlassian publishes a machine readable ingress feed at `https://ip-ranges.atlassian.com/`, and the script reports both what is published but not allowlisted, and what is allowlisted but no longer published. Anthropic and OpenAI publish egress ranges only, which are the addresses their servers call out from rather than the addresses their API hostnames answer on, so DNS is the only usable signal for those two.
+
+Nothing is applied automatically. When drift is reported, enter maintenance mode, update the array in `Set-ClaudeVMNetworkMode.ps1` and the `/etc/hosts` pins, then re-lock.
+
+`locked` mode runs this script automatically after applying ACLs. The check is advisory: if it fails or is missing, locking still succeeds with a warning.
+
+A provider whose addresses are entirely uncovered is reported as `not currently allowlisted (toggled off?)` rather than as drift. That is the normal state for Atlassian when the switch is off.
+
 
 ## 18. Maintenance Mode Toggle
 
@@ -830,12 +913,15 @@ Parameters:
 | `-VMName` | `claude-base` | VM whose adapter ACLs are changed |
 | `-AdapterName` | auto-detected | resolved from the VM when not supplied |
 | `-SwitchName` | `fresh-claude-switch` | used to resolve the host-side IP |
+| `-Atlassian` | off | also allow the Atlassian Cloud ranges (section 17) |
 
 Behaviour:
 
-* `maintenance` removes only the outbound `0.0.0.0/0` deny rule. The allow rules stay in place and the VM regains general outbound internet access.
-* `locked` re-applies every entry in the `$Allowlist` array, then re-applies the outbound `0.0.0.0/0` deny.
+* `maintenance` removes the outbound `0.0.0.0/0` and `::/0` deny rules. The allow rules stay in place and the VM regains general outbound internet access.
+* `locked` applies every entry in the `$Allowlist` array, plus `$AtlassianAllowlist` when `-Atlassian` is passed, then re-applies both deny rules. It also **removes any outbound allow rule that is not in that set**, which is what makes `-Atlassian` reversible. Finally it runs `Test-IPACLDrift.ps1` if present, as an advisory check.
 * `status` prints the current ACLs and changes nothing.
+
+Locked mode denies `::/0` as well as `0.0.0.0/0`. The IPv4 deny says nothing about IPv6, so without it the guest would be unconstrained over IPv6 the moment it acquired an address. This is inert on an IPv4-only guest.
 
 The host IP is resolved at runtime from `vEthernet (fresh-claude-switch)` rather than hardcoded. Provider entries are hardcoded in the `$Allowlist` array near the top of the script.
 
@@ -1068,152 +1154,10 @@ C:\VMs\templates\claude-base-template.vhdx
 
 This lets you run a single task in a clean copy and destroy all changes afterward.
 
-Create the script:
-
-```powershell
-notepad C:\VMs\New-ClaudeEphemeral.ps1
-```
-
-Paste:
-
-```powershell
-param(
-    [Parameter(Mandatory = $false)]
-    [string]$Name = "",
-
-    [Parameter(Mandatory = $false)]
-    [int]$MemoryGB = 4,
-
-    [Parameter(Mandatory = $false)]
-    [int]$CpuCount = 2,
-
-    [Parameter(Mandatory = $false)]
-    [switch]$Maintenance
-)
-
-$ErrorActionPreference = "Stop"
-
-$TemplateDisk = "C:\VMs\templates\claude-base-template.vhdx"
-$SwitchName   = "fresh-claude-switch"
-$Root         = "C:\VMs\ephemeral"
-$DiskDir      = "$Root\disks"
-$VmRootDir    = "$Root\vms"
-
-$HostIP       = "172.30.101.1"
-$ClaudeAPI    = "160.79.104.0/21"
-
-if (-not (Test-Path $TemplateDisk)) {
-    throw "Template disk not found: $TemplateDisk"
-}
-
-if (-not (Get-VMSwitch -Name $SwitchName -ErrorAction SilentlyContinue)) {
-    throw "Hyper-V switch not found: $SwitchName"
-}
-
-if ([string]::IsNullOrWhiteSpace($Name)) {
-    $Stamp = Get-Date -Format "yyyyMMdd-HHmmss"
-    $Name = "claude-ephemeral-$Stamp"
-}
-
-if (Get-VM -Name $Name -ErrorAction SilentlyContinue) {
-    throw "A VM already exists with this name: $Name"
-}
-
-New-Item -ItemType Directory -Force -Path $DiskDir, $VmRootDir | Out-Null
-
-$VmDir    = Join-Path $VmRootDir $Name
-$DiffDisk = Join-Path $DiskDir "$Name.vhdx"
-
-if (Test-Path $DiffDisk) {
-    throw "Differencing disk already exists: $DiffDisk"
-}
-
-Write-Host "Creating ephemeral VM: $Name"
-Write-Host "Template disk: $TemplateDisk"
-Write-Host "Differencing disk: $DiffDisk"
-Write-Host ""
-
-New-Item -ItemType Directory -Force -Path $VmDir | Out-Null
-
-New-VHD `
-    -Path $DiffDisk `
-    -ParentPath $TemplateDisk `
-    -Differencing | Out-Null
-
-New-VM `
-    -Name $Name `
-    -Generation 2 `
-    -MemoryStartupBytes ($MemoryGB * 1GB) `
-    -VHDPath $DiffDisk `
-    -SwitchName $SwitchName `
-    -Path $VmDir | Out-Null
-
-Set-VMFirmware `
-    -VMName $Name `
-    -EnableSecureBoot On `
-    -SecureBootTemplate "MicrosoftUEFICertificateAuthority"
-
-$BootDisk = Get-VMHardDiskDrive -VMName $Name
-
-Set-VMFirmware `
-    -VMName $Name `
-    -FirstBootDevice $BootDisk
-
-Set-VMProcessor `
-    -VMName $Name `
-    -Count $CpuCount
-
-Set-VMMemory `
-    -VMName $Name `
-    -DynamicMemoryEnabled $true `
-    -MinimumBytes 2GB `
-    -StartupBytes ($MemoryGB * 1GB) `
-    -MaximumBytes 8GB
-
-Set-VM `
-    -Name $Name `
-    -CheckpointType Disabled
-
-$Adapter = (Get-VMNetworkAdapter -VMName $Name).Name
-
-if ($Maintenance) {
-    Write-Host "Maintenance mode requested: no outbound deny will be applied."
-} else {
-    Write-Host "Applying locked outbound ACL policy..."
-
-    Add-VMNetworkAdapterAcl `
-        -VMName $Name `
-        -VMNetworkAdapterName $Adapter `
-        -RemoteIPAddress "$HostIP/32" `
-        -Direction Outbound `
-        -Action Allow
-
-    Add-VMNetworkAdapterAcl `
-        -VMName $Name `
-        -VMNetworkAdapterName $Adapter `
-        -RemoteIPAddress $ClaudeAPI `
-        -Direction Outbound `
-        -Action Allow
-
-    Add-VMNetworkAdapterAcl `
-        -VMName $Name `
-        -VMNetworkAdapterName $Adapter `
-        -RemoteIPAddress "0.0.0.0/0" `
-        -Direction Outbound `
-        -Action Deny
-}
-
-Start-VM -Name $Name
-
-Write-Host ""
-Write-Host "Started ephemeral VM: $Name"
-Write-Host ""
-Write-Host "Network ACLs:"
-Get-VMNetworkAdapterAcl -VMName $Name -VMNetworkAdapterName $Adapter
-Write-Host ""
-Write-Host "Destroy with:"
-Write-Host "  C:\VMs\Remove-ClaudeEphemeral.ps1 -Name $Name"
-```
+The script lives at `C:\VMs\New-ClaudeEphemeral.ps1` and is version controlled
+alongside this readme. It does not define its own allowlist. It calls
+`Set-ClaudeVMNetworkMode.ps1 -Mode locked`, so ephemeral VMs inherit the single
+allowlist defined there and pick up any change to it automatically.
 
 Create a locked ephemeral VM:
 
@@ -1231,6 +1175,12 @@ Create one in maintenance mode:
 
 ```powershell
 C:\VMs\New-ClaudeEphemeral.ps1 -Name claude-maint-001 -Maintenance
+```
+
+Create one with Atlassian Cloud access for Jira work (see section 17):
+
+```powershell
+C:\VMs\New-ClaudeEphemeral.ps1 -Name claude-jira-001 -Atlassian
 ```
 
 Check running VMs:
@@ -1251,63 +1201,9 @@ Important: if the template uses static IP `172.30.101.50`, run only one clone at
 
 ## 22. Destroy Ephemeral VMs
 
-Create the destroy script:
-
-```powershell
-notepad C:\VMs\Remove-ClaudeEphemeral.ps1
-```
-
-Paste:
-
-```powershell
-param(
-    [Parameter(Mandatory = $true)]
-    [string]$Name
-)
-
-$ErrorActionPreference = "Stop"
-
-$Root      = "C:\VMs\ephemeral"
-$DiskDir   = "$Root\disks"
-$VmRootDir = "$Root\vms"
-
-$DiffDisk = Join-Path $DiskDir "$Name.vhdx"
-$VmDir    = Join-Path $VmRootDir $Name
-
-Write-Host "Destroying ephemeral VM: $Name"
-Write-Host ""
-
-$VM = Get-VM -Name $Name -ErrorAction SilentlyContinue
-
-if ($VM) {
-    if ($VM.State -ne "Off") {
-        Write-Host "Stopping VM..."
-        Stop-VM -Name $Name -TurnOff -Force -ErrorAction SilentlyContinue
-    }
-
-    Write-Host "Removing VM registration..."
-    Remove-VM -Name $Name -Force
-} else {
-    Write-Host "VM not found in Hyper-V. Continuing cleanup..."
-}
-
-if (Test-Path $DiffDisk) {
-    Write-Host "Deleting differencing disk: $DiffDisk"
-    Remove-Item -Path $DiffDisk -Force
-} else {
-    Write-Host "Differencing disk not found: $DiffDisk"
-}
-
-if (Test-Path $VmDir) {
-    Write-Host "Deleting VM folder: $VmDir"
-    Remove-Item -Path $VmDir -Recurse -Force
-} else {
-    Write-Host "VM folder not found: $VmDir"
-}
-
-Write-Host ""
-Write-Host "Destroyed ephemeral VM: $Name"
-```
+The script lives at `C:\VMs\Remove-ClaudeEphemeral.ps1` and is version controlled
+alongside this readme. Do not paste a copy into this document: an out of date
+listing is worse than no listing.
 
 Destroy an ephemeral VM:
 
@@ -1514,7 +1410,9 @@ This setup is intended to reduce sandbox risk by applying multiple controls:
 * VM isolated on an internal Hyper-V switch.
 * VM outbound traffic restricted with Hyper-V VM network adapter ACLs.
 * Claude/Anthropic traffic allowed only by IP range.
-* General outbound traffic denied in locked mode.
+* General outbound traffic denied in locked mode, over both IPv4 (`0.0.0.0/0`) and IPv6 (`::/0`).
+* Atlassian Cloud access is off by default and must be enabled per lock with `-Atlassian`. It widens egress by roughly 7,500 addresses.
+* Locked mode is declarative: it removes any outbound allow rule it does not own, so a temporary widening cannot survive the next lock unnoticed.
 * Maintenance mode must be explicitly enabled for package installs or updates.
 * Sandbox user is non-root.
 * SSH password login can be disabled.
@@ -1523,7 +1421,7 @@ This setup is intended to reduce sandbox risk by applying multiple controls:
 Important limitations:
 
 * Hyper-V VM network adapter ACLs are IP/CIDR based, not FQDN based.
-* `/etc/hosts` pinning can become stale if Claude endpoint IPs change.
+* `/etc/hosts` pinning can become stale if provider endpoint IPs change. A pinned address can stop being served while its CIDR stays allowlisted, which presents as a connection timeout rather than a firewall block. `Test-IPACLDrift.ps1` exists to surface this; it is not run on a schedule unless one is configured.
 * Normal outbound DNS is blocked in locked mode unless explicitly allowed.
 * If the VM is compromised, anything permitted by the ACL is still reachable.
 * Static VM IPs should be protected from accidental reuse.

@@ -10,7 +10,12 @@ param(
     [string]$AdapterName = "",
 
     [Parameter(Mandatory = $false)]
-    [string]$SwitchName = "fresh-claude-switch"
+    [string]$SwitchName = "fresh-claude-switch",
+
+    # Atlassian Cloud access is off unless asked for. Re-running locked mode
+    # without this switch removes the Atlassian rules again.
+    [Parameter(Mandatory = $false)]
+    [switch]$Atlassian
 )
 
 $ErrorActionPreference = "Stop"
@@ -38,11 +43,25 @@ if ([string]::IsNullOrWhiteSpace($AdapterName)) {
 
 $Allowlist = @(
     "$HostIP/32",          # Host
-    "160.79.104.0/21",    # Claude API
-    "104.18.41.241/32",   # OpenAI/Auth
-    "162.159.140.245/32",
-    "172.64.146.15/32",
-    "172.66.0.243/32"
+    "160.79.104.0/21",     # Claude - api.anthropic.com, platform.claude.com, claude.ai
+    "104.18.41.241/32",    # Codex - auth.openai.com
+    "172.64.146.15/32",    # Codex - auth.openai.com
+    "162.159.140.245/32",  # Codex - api.openai.com
+    "172.66.0.243/32"      # Codex - api.openai.com
+)
+
+# Atlassian Cloud ingress ranges: commercial perimeter, product "jira", IPv4 only.
+# Source: https://ip-ranges.atlassian.com/ (snapshot 2026-06-17, syncToken 1781669326)
+# Applied only with -Atlassian. Check for upstream changes with Test-IPACLDrift.ps1.
+$AtlassianAllowlist = @(
+    "13.35.248.0/24",
+    "13.200.41.128/25",
+    "13.227.180.0/24",     # api.atlassian.com, *.atlassian.net
+    "13.227.213.0/24",
+    "16.63.53.128/25",
+    "43.202.69.0/25",
+    "104.192.136.0/21",    # mcp.atlassian.com (Rovo MCP)
+    "185.166.140.0/22"
 )
 
 function Show-Acls {
@@ -157,13 +176,15 @@ switch ($Mode) {
         Write-Host "Entering maintenance mode for VM: $VMName"
 
         Remove-Acl -IP "0.0.0.0/0" -Action Deny
+        Remove-Acl -IP "::/0" -Action Deny
 
-        $remainingDeny = @(Get-MatchingAcls -IP "0.0.0.0/0" -Action Deny)
+        $remainingDeny = @(Get-MatchingAcls -IP "0.0.0.0/0" -Action Deny) +
+                         @(Get-MatchingAcls -IP "::/0" -Action Deny)
 
         if ($remainingDeny.Count -gt 0) {
             Write-Host ""
             Show-Acls
-            throw "Failed to remove the outbound 0.0.0.0/0 Deny ACL from $VMName ($AdapterName). The VM is still network locked."
+            throw "Failed to remove an outbound Deny ACL from $VMName ($AdapterName). The VM is still network locked."
         }
 
         Write-Host ""
@@ -176,17 +197,71 @@ switch ($Mode) {
     "locked" {
         Write-Host "Restoring locked mode for VM: $VMName"
 
-        foreach ($ip in $Allowlist) {
+        $desired = @($Allowlist)
+
+        if ($Atlassian) {
+            $desired += $AtlassianAllowlist
+        }
+
+        # Locked mode owns the whole set of outbound Allow rules, so anything not
+        # in $desired is stale and has to go. Without this the -Atlassian switch
+        # would only ever be one way: rules added by a previous run would survive.
+        $desiredVariants = @(
+            $desired | ForEach-Object { Get-AclAddressVariants -IP $_ }
+        )
+
+        $currentAllows = @(
+            Show-Acls |
+                Where-Object {
+                    $_.Direction -eq "Outbound" -and
+                    $_.Action -eq "Allow"
+                }
+        )
+
+        foreach ($acl in $currentAllows) {
+            $address = Get-AclRemoteAddress -Acl $acl
+
+            if ($desiredVariants -notcontains $address) {
+                Write-Host "Removing stale allow rule: $address"
+                Remove-Acl -IP $address -Action Allow
+            }
+        }
+
+        foreach ($ip in $desired) {
             Set-Acl -IP $ip -Action Allow
         }
 
         Set-Acl -IP "0.0.0.0/0" -Action Deny
 
+        # The IPv4 deny says nothing about IPv6. Without this the guest would be
+        # unconstrained over IPv6 the moment it ever acquired an address.
+        Set-Acl -IP "::/0" -Action Deny
+
         Write-Host ""
-        Write-Host "Locked mode active. VM outbound is limited to host + Claude/OpenAI API ranges."
+
+        if ($Atlassian) {
+            Write-Host "Locked mode active. VM outbound is limited to host + Claude/Codex + Atlassian ranges."
+        }
+        else {
+            Write-Host "Locked mode active. VM outbound is limited to host + Claude/Codex API ranges."
+        }
+
         Write-Host ""
 
         Show-Acls
+
+        # Advisory only. A drift report must never stop the VM from locking, so a
+        # missing or failing checker is a warning and nothing more.
+        $driftScript = Join-Path $PSScriptRoot "Test-IPACLDrift.ps1"
+
+        if (Test-Path $driftScript) {
+            try {
+                & $driftScript -VMName $VMName -AdapterName $AdapterName
+            }
+            catch {
+                Write-Warning "Drift check failed: $($_.Exception.Message)"
+            }
+        }
     }
 
     "status" {

@@ -9,7 +9,11 @@ param(
     [int]$CpuCount = 2,
 
     [Parameter(Mandatory = $false)]
-    [switch]$Maintenance
+    [switch]$Maintenance,
+
+    # Forwarded to the lock script. Off unless asked for.
+    [Parameter(Mandatory = $false)]
+    [switch]$Atlassian
 )
 
 $ErrorActionPreference = "Stop"
@@ -130,7 +134,8 @@ else {
         -Mode locked `
         -VMName $Name `
         -AdapterName $Adapter `
-        -SwitchName $SwitchName
+        -SwitchName $SwitchName `
+        -Atlassian:$Atlassian
 }
 
 Start-VM -Name $Name
