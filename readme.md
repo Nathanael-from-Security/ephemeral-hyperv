@@ -504,17 +504,24 @@ sudo apt install -y curl ca-certificates gnupg git nodejs npm
 
 The two CLIs are installed differently, and the maintenance workflow in section 19 depends on that difference:
 
-* **Claude Code** is a root-owned npm global, available to every account in the VM.
-* **Codex** is installed under the `sandbox` user's own npm prefix, so it exists only for that account.
+* **Claude Code** is installed twice: as a root-owned npm global, and again under the `sandbox` user's own npm prefix.
+* **Codex** is installed under the `sandbox` user's npm prefix only, so it exists for that account alone.
+
+The duplication matters. `sandbox` has `~/.npm-global/bin` ahead of `/usr/local/bin` on its `PATH`, so the user-level copy shadows the root-owned one. Updating only the root global leaves the account that actually runs Claude on the old version, while `claude --version` as root reports the new one. Always check both.
 
 ### Claude Code
 
-Install a pinned version so the image is reproducible:
+Install a pinned version so the image is reproducible, for root and for the sandbox user:
 
 ```bash
 sudo npm install -g @anthropic-ai/claude-code@2.1.258
 claude --version
+
+sudo -u sandbox -H bash -lc 'npm install -g @anthropic-ai/claude-code@2.1.258'
+sudo -u sandbox -H bash -lc 'claude --version'
 ```
+
+Both must report the same version. If they differ, the sandbox copy is the one that wins at the prompt.
 
 ### Codex
 
@@ -896,10 +903,10 @@ C:\VMs\Update-ClaudeBase.ps1 -Force -NoConnect -AutoUpdateGuest
 It waits for port 22 to accept connections, stages the shared folder, then runs a single `sudo` session in the guest that:
 
 * runs `apt-get update`, `upgrade`, `autoremove` and `clean` with `DEBIAN_FRONTEND=noninteractive` and `--force-confold`;
-* installs the pinned Claude Code version as a root-owned npm global;
+* installs the pinned Claude Code version twice, as a root-owned npm global and under the sandbox user's npm prefix, because the latter shadows the former on the sandbox `PATH`;
 * runs `npm install -g @openai/codex` as the sandbox user, via `sudo -u`;
 * copies the contents of `C:\VMs\SharedFolder\` into `/home/sandbox` and applies `chown -R sandbox:sandbox`;
-* prints the resulting `claude` and `codex` versions.
+* prints `claude --version` for root and for the sandbox user separately, plus `codex --version`.
 
 Relevant parameters:
 
@@ -913,11 +920,12 @@ Relevant parameters:
 | `-ClaudeCodeVersion` | `2.1.258` | Pinned npm version, for a reproducible image |
 | `-SharedFolderPath` | `C:\VMs\SharedFolder` | Host folder copied into the sandbox home directory |
 | `-SshTimeoutSeconds` | `180` | How long to wait for SSH after the VM starts |
+| `-SkipAgentCheck` | off | Proceed without a loaded agent key and answer passphrase prompts by hand |
 
 Notes and limitations:
 
 * `sudo` prompts once for the password of `-SshUser`, interactively, because the whole guest update runs in one `ssh -t` session. No password is stored in the script, in a file, or in the environment. For genuinely unattended runs, add a scoped `NOPASSWD` rule in `/etc/sudoers.d/` for the specific commands rather than storing a secret.
-* `claude_sandbox_ed25519` is passphrase-protected. Load it into the Windows SSH agent once per session, or each of the four SSH and SCP calls in the run will prompt separately:
+* `claude_sandbox_ed25519` is passphrase-protected. The script refuses to start with `-AutoUpdateGuest` unless a key is loaded in the SSH agent, because passphrase prompts do not reliably render inside a scripted sequence and present as a hang. The check runs before anything is stopped, so a failure costs no VM restart. Load the key once per login session:
 
 ```powershell
 Start-Service ssh-agent

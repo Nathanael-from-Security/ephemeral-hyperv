@@ -73,6 +73,8 @@ param(
 
     [switch]$AutoUpdateGuest,
 
+    [switch]$SkipAgentCheck,
+
     [switch]$Force,
 
     [switch]$NoConnect
@@ -139,11 +141,27 @@ function Test-SshAgentKey {
         return
     }
 
-    Write-Warn "No key is loaded in the SSH agent."
-    Write-Warn "If $SshKeyPath has a passphrase, you will be prompted for it on each of the"
-    Write-Warn "four SSH/SCP calls in this run. To be prompted once instead, cancel and run:"
-    Write-Warn "    Start-Service ssh-agent"
-    Write-Warn "    ssh-add `"$SshKeyPath`""
+    $message = @(
+        "No key is loaded in the SSH agent."
+        ""
+        "$SshKeyPath is passphrase-protected. Without an agent key, each SSH and SCP"
+        "call in this run prompts for the passphrase, and those prompts do not always"
+        "render inside a script, which looks like a hang. Load the key first:"
+        ""
+        "    Set-Service ssh-agent -StartupType Manual"
+        "    Start-Service ssh-agent"
+        "    ssh-add `"$SshKeyPath`""
+        "    ssh-add -l"
+        ""
+        "Re-run with -SkipAgentCheck to proceed anyway and answer the prompts by hand."
+    ) -join [Environment]::NewLine
+
+    if ($SkipAgentCheck) {
+        Write-Warn $message
+        return
+    }
+
+    throw $message
 }
 
 function Invoke-Ssh {
@@ -281,6 +299,12 @@ Assert-Administrator
 
 $RemoveEphemeralScriptPath = Join-Path $PSScriptRoot "Remove-ClaudeEphemeral.ps1"
 
+if ($AutoUpdateGuest) {
+    # Checked before anything is stopped, so a missing agent key does not cost
+    # a needless shutdown and restart of a running base VM.
+    Test-SshAgentKey
+}
+
 Write-Step "Checking Hyper-V state..."
 
 $baseVm = Get-VM -Name $BaseVmName -ErrorAction Stop
@@ -376,8 +400,6 @@ if ($maintenanceNetworkingApplied) {
 if ($AutoUpdateGuest) {
     Write-Step "Updating the guest over SSH..."
 
-    Test-SshAgentKey
-
     Wait-ForSsh -IpAddress $BaseVmIp -TimeoutSeconds $SshTimeoutSeconds
 
     $staging = "/tmp/claude-base-staging"
@@ -430,6 +452,12 @@ apt-get clean
 echo "[*] Installing Claude Code ${CLAUDE_VERSION} (root-owned npm global)..."
 npm install -g "@anthropic-ai/claude-code@${CLAUDE_VERSION}"
 
+echo "[*] Installing Claude Code ${CLAUDE_VERSION} for ${SANDBOX_USER}..."
+# The sandbox user has its own npm prefix, and that bin directory precedes
+# /usr/local/bin on PATH. Without this step the root-owned global is updated
+# but the account that actually runs Claude keeps its shadowing copy.
+sudo -u "${SANDBOX_USER}" -H bash -lc "npm install -g @anthropic-ai/claude-code@${CLAUDE_VERSION}"
+
 echo "[*] Updating Codex for ${SANDBOX_USER}..."
 sudo -u "${SANDBOX_USER}" -H bash -lc 'npm install -g @openai/codex'
 
@@ -456,8 +484,12 @@ else
 fi
 
 echo "[*] Installed versions:"
-claude --version || echo "    claude: not available"
-sudo -u "${SANDBOX_USER}" -H bash -lc 'codex --version' || echo "    codex: not available"
+printf '    root claude:    '
+claude --version || echo "not available"
+printf '    %s claude: ' "${SANDBOX_USER}"
+sudo -u "${SANDBOX_USER}" -H bash -lc 'claude --version' || echo "not available"
+printf '    %s codex:  ' "${SANDBOX_USER}"
+sudo -u "${SANDBOX_USER}" -H bash -lc 'codex --version' || echo "not available"
 
 echo "[+] Guest update complete."
 '@

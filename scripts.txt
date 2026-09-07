@@ -55,10 +55,12 @@ C:\VMs\Update-ClaudeBase.ps1 -Force -NoConnect -AutoUpdateGuest
 # Host: same, but also update the guest automatically over SSH.
 # -AutoUpdateGuest waits for port 22, then runs ONE sudo session that does:
 #   - apt update / upgrade / autoremove / clean
-#   - npm install -g @anthropic-ai/claude-code@<-ClaudeCodeVersion>  (root global)
+#   - npm install -g @anthropic-ai/claude-code@<-ClaudeCodeVersion> as root
+#   - the same pinned install as the sandbox user, whose ~/.npm-global/bin
+#     precedes /usr/local/bin on PATH and would otherwise shadow the root copy
 #   - npm install -g @openai/codex as the sandbox user
 #   - copies C:\VMs\SharedFolder\ contents into /home/sandbox, then chowns them
-#   - prints claude and codex versions
+#   - prints claude --version for root AND for sandbox, plus codex --version
 # It logs in as 'user' and sudo prompts once, interactively.
 # No password is stored in the script or on disk.
 
@@ -72,8 +74,10 @@ C:\VMs\Update-ClaudeBase.ps1 -Force -NoConnect -AutoUpdateGuest
 #   -SshTimeoutSeconds  180
 C:\VMs\Update-ClaudeBase.ps1 -AutoUpdateGuest -ClaudeCodeVersion 2.1.263
 
-# NOTE: claude_sandbox_ed25519 has a passphrase. Load it into the agent once
-# per Windows session, otherwise every SSH/SCP call in the run prompts for it:
+# NOTE: claude_sandbox_ed25519 has a passphrase. -AutoUpdateGuest refuses to
+# start unless a key is loaded in the agent, because passphrase prompts do not
+# reliably render inside a script and look like a hang. Load it once per
+# Windows login session (-SkipAgentCheck overrides, prompts by hand):
 Start-Service ssh-agent
 ssh-add "C:\VMs\ssh\claude_sandbox_ed25519"
 ssh-add -l
@@ -106,10 +110,14 @@ sudo apt autoremove -y
 sudo apt clean
 
 # Inside claude-base: make any baseline changes future clones should inherit
-# Claude Code is a root-owned npm global install (readme section 13). Pin the
-# version so the image is reproducible:
+# Claude Code is installed twice (readme section 13): a root-owned npm global,
+# and a copy under sandbox's ~/.npm-global that shadows it on sandbox's PATH.
+# Update BOTH or the sandbox prompt keeps the old version:
 # sudo npm install -g @anthropic-ai/claude-code@2.1.258
 # claude --version
+# sudo -u sandbox -H bash -lc 'npm install -g @anthropic-ai/claude-code@2.1.258'
+# sudo -u sandbox -H bash -lc 'claude --version'
+# sudo -u sandbox -H bash -lc 'npm install -g @openai/codex'
 # Other examples:
 # pipx upgrade-all
 # npm update -g
