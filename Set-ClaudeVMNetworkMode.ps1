@@ -12,8 +12,10 @@ param(
     [Parameter(Mandatory = $false)]
     [string]$SwitchName = "fresh-claude-switch",
 
-    # Atlassian Cloud access is off unless asked for. Re-running locked mode
-    # without this switch removes the Atlassian rules again.
+    # PLACEHOLDER. Accepted and warned about, but applies no rules.
+    # Atlassian Cloud is reached through mcp-proxy.anthropic.com, which already
+    # falls inside the Claude range, so no Atlassian CIDRs are needed. Kept so
+    # existing invocations do not break and so the reason stays visible.
     [Parameter(Mandatory = $false)]
     [switch]$Atlassian
 )
@@ -50,19 +52,10 @@ $Allowlist = @(
     "172.66.0.243/32"      # Codex - api.openai.com
 )
 
-# Atlassian Cloud ingress ranges: commercial perimeter, product "jira", IPv4 only.
-# Source: https://ip-ranges.atlassian.com/ (snapshot 2026-06-17, syncToken 1781669326)
-# Applied only with -Atlassian. Check for upstream changes with Test-IPACLDrift.ps1.
-$AtlassianAllowlist = @(
-    "13.35.248.0/24",
-    "13.200.41.128/25",
-    "13.227.180.0/24",     # api.atlassian.com, *.atlassian.net
-    "13.227.213.0/24",
-    "16.63.53.128/25",
-    "43.202.69.0/25",
-    "104.192.136.0/21",    # mcp.atlassian.com (Rovo MCP)
-    "185.166.140.0/22"
-)
+# The Atlassian ingress ranges that used to live here were removed once traffic
+# was shown to reach Atlassian through mcp-proxy.anthropic.com rather than
+# directly. Recover them from git history if direct REST or curl access to
+# Atlassian is ever needed from the sandbox.
 
 function Show-Acls {
     Get-VMNetworkAdapterAcl `
@@ -200,12 +193,13 @@ switch ($Mode) {
         $desired = @($Allowlist)
 
         if ($Atlassian) {
-            $desired += $AtlassianAllowlist
+            # A switch that silently does nothing is a trap, so say so plainly.
+            Write-Warning "-Atlassian is a placeholder and applies no rules. Atlassian is reached through mcp-proxy.anthropic.com, inside the Claude range."
         }
 
         # Locked mode owns the whole set of outbound Allow rules, so anything not
-        # in $desired is stale and has to go. Without this the -Atlassian switch
-        # would only ever be one way: rules added by a previous run would survive.
+        # in $desired is stale and has to go. This is what removes the Atlassian
+        # rules left behind by an earlier version of this script.
         $desiredVariants = @(
             $desired | ForEach-Object { Get-AclAddressVariants -IP $_ }
         )
@@ -239,12 +233,7 @@ switch ($Mode) {
 
         Write-Host ""
 
-        if ($Atlassian) {
-            Write-Host "Locked mode active. VM outbound is limited to host + Claude/Codex + Atlassian ranges."
-        }
-        else {
-            Write-Host "Locked mode active. VM outbound is limited to host + Claude/Codex API ranges."
-        }
+        Write-Host "Locked mode active. VM outbound is limited to host + Claude/Codex API ranges."
 
         Write-Host ""
 

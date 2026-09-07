@@ -6,17 +6,12 @@
 .DESCRIPTION
     Read-only. This script never changes an ACL, a VM, or the guest.
 
-    Two checks run per provider:
+    One check runs per provider:
 
       * DNS coverage. Each provider hostname is resolved on the host and every
         returned address is tested against the union of the VM's outbound Allow
         ACLs. An address that no rule covers is drift: the guest would be able to
         resolve it (or have it pinned in /etc/hosts) and still be blocked.
-
-      * Feed coverage. Only Atlassian publishes a machine readable ingress feed.
-        Anthropic and OpenAI publish egress ranges only, which are the addresses
-        their servers call out from, not the addresses their API hostnames answer
-        on, so DNS is the only usable signal for those two.
 
     Nothing here is applied automatically. When drift is reported, enter
     maintenance mode and update the allowlist in Set-ClaudeVMNetworkMode.ps1 and
@@ -32,7 +27,7 @@
 
 param(
     [Parameter(Mandatory = $false)]
-    [ValidateSet("all", "claude", "codex", "atlassian")]
+    [ValidateSet("all", "claude", "codex")]
     [string]$Provider = "all",
 
     [Parameter(Mandatory = $false)]
@@ -43,10 +38,6 @@ param(
 
     [Parameter(Mandatory = $false)]
     [int]$DnsSamples = 3,
-
-    # Tenant specific, so it cannot be hardcoded. Example: -AtlassianSite totara
-    [Parameter(Mandatory = $false)]
-    [string]$AtlassianSite = "",
 
     # Exit 1 when drift is found, for use from a scheduled task.
     [Parameter(Mandatory = $false)]
@@ -66,25 +57,12 @@ $Providers = [ordered]@{
             # connecting to the provider directly, so this must resolve too.
             "mcp-proxy.anthropic.com"
         )
-        Feed      = $null
         Note      = ""
     }
     codex = @{
         Label     = "Codex / OpenAI"
         Hostnames = @("api.openai.com", "auth.openai.com")
-        Feed      = $null
         Note      = "Cloudflare anycast. Addresses rotate; the guest only ever uses the address pinned in /etc/hosts."
-    }
-    atlassian = @{
-        Label     = "Atlassian Cloud"
-        Hostnames = @(
-            "mcp.atlassian.com",
-            "api.atlassian.com",
-            "id.atlassian.com",
-            "auth.atlassian.com"
-        )
-        Feed      = "https://ip-ranges.atlassian.com/"
-        Note      = "mcp.atlassian.com is in Atlassian's own space; the rest are CloudFront backed. One pinned address will not serve all of them."
     }
 }
 
@@ -147,55 +125,6 @@ function ConvertTo-IpRange {
         End   = $start + $size - 1
         Cidr  = $Cidr
     }
-}
-
-function Merge-IpRange {
-    param(
-        [Parameter(Mandatory = $false)]
-        [object[]]$Range = @()
-    )
-
-    # Coverage is tested against the union of every allow rule, not against rules
-    # one at a time, so two adjacent CIDRs cover a block that spans both.
-    $merged = @()
-
-    foreach ($item in @($Range | Sort-Object Start, End)) {
-        if ($merged.Count -eq 0) {
-            $merged += [PSCustomObject]@{ Start = $item.Start; End = $item.End }
-            continue
-        }
-
-        $last = $merged[$merged.Count - 1]
-
-        if ($item.Start -le $last.End + 1) {
-            if ($item.End -gt $last.End) {
-                $last.End = $item.End
-            }
-        }
-        else {
-            $merged += [PSCustomObject]@{ Start = $item.Start; End = $item.End }
-        }
-    }
-
-    return @($merged)
-}
-
-function Test-RangeCovered {
-    param(
-        [Parameter(Mandatory = $true)]
-        $Range,
-
-        [Parameter(Mandatory = $false)]
-        [object[]]$Merged = @()
-    )
-
-    foreach ($block in $Merged) {
-        if ($Range.Start -ge $block.Start -and $Range.End -le $block.End) {
-            return $true
-        }
-    }
-
-    return $false
 }
 
 function Get-CoveringRule {
@@ -281,43 +210,6 @@ function Resolve-HostAddress {
     return @($found | Select-Object -Unique | Sort-Object)
 }
 
-function Get-AtlassianPublishedCidr {
-    param(
-        [Parameter(Mandatory = $true)]
-        [string]$Feed
-    )
-
-    try {
-        $json = Invoke-RestMethod -Uri $Feed -UseBasicParsing -TimeoutSec 20
-    }
-    catch {
-        Write-Warning "  Could not fetch $Feed : $($_.Exception.Message)"
-        Write-Warning "  Feed comparison skipped. DNS results below are still valid."
-        return $null
-    }
-
-    $cidrs = @(
-        $json.items |
-            Where-Object {
-                $_.direction -contains "ingress" -and
-                $_.perimeter -eq "commercial" -and
-                $_.product -contains "jira" -and
-                $_.cidr -notmatch ":"
-            } |
-            Select-Object -ExpandProperty cidr -Unique
-    )
-
-    if ($cidrs.Count -eq 0) {
-        Write-Warning "  Feed returned no matching IPv4 ingress CIDRs. The upstream schema may have changed."
-        return $null
-    }
-
-    return [PSCustomObject]@{
-        Cidrs        = $cidrs
-        CreationDate = $json.creationDate
-    }
-}
-
 # --- Report ---------------------------------------------------------------
 
 $allowRules = Get-AllowedRange
@@ -325,8 +217,6 @@ $allowRules = Get-AllowedRange
 if ($allowRules.Count -eq 0) {
     throw "No outbound Allow ACLs found on $VMName ($AdapterName). The VM may be in maintenance mode, in which case drift cannot be assessed."
 }
-
-$allowMerged = @(Merge-IpRange -Range $allowRules)
 
 Write-Host ""
 Write-Host "IP / ACL drift report"
@@ -349,10 +239,6 @@ foreach ($key in $selected) {
     $entry = $Providers[$key]
 
     $hostnames = @($entry.Hostnames)
-
-    if ($key -eq "atlassian" -and -not [string]::IsNullOrWhiteSpace($AtlassianSite)) {
-        $hostnames += "$AtlassianSite.atlassian.net"
-    }
 
     Write-Host ""
     Write-Host $entry.Label
@@ -410,70 +296,6 @@ foreach ($key in $selected) {
         Write-Warning "  Action: if you re-pin any DRIFT address in the guest /etc/hosts, add it to the allowlist first."
     }
 
-    if ([string]::IsNullOrWhiteSpace($entry.Feed)) {
-        continue
-    }
-
-    $published = Get-AtlassianPublishedCidr -Feed $entry.Feed
-
-    if ($null -eq $published) {
-        continue
-    }
-
-    $publishedRanges = @($published.Cidrs | ForEach-Object { ConvertTo-IpRange -Cidr $_ })
-    $publishedMerged = @(Merge-IpRange -Range $publishedRanges)
-
-    # Compared by address coverage rather than by CIDR string. The raw feed
-    # publishes a /21 alongside its own constituent /24s, so string comparison
-    # against a collapsed allowlist would report drift on every single run.
-    $missing = @($publishedRanges | Where-Object { -not (Test-RangeCovered -Range $_ -Merged $allowMerged) })
-
-    $stale = @()
-
-    # Only allow rules that overlap published Atlassian space are candidates for
-    # removal. Claude, Codex and the host rule must never be reported here.
-    foreach ($rule in $allowRules) {
-        $overlaps = $false
-
-        foreach ($block in $publishedMerged) {
-            if ($rule.Start -le $block.End -and $rule.End -ge $block.Start) {
-                $overlaps = $true
-                break
-            }
-        }
-
-        if ($overlaps -and -not (Test-RangeCovered -Range $rule -Merged $publishedMerged)) {
-            $stale += $rule
-        }
-    }
-
-    if ($missing.Count -eq 0 -and $stale.Count -eq 0) {
-        Write-Host "  feed: matches the applied allowlist (published $($published.CreationDate))"
-        continue
-    }
-
-    $driftFound = $true
-
-    Write-Warning "  ATLASSIAN IP RANGES HAVE CHANGED (published $($published.CreationDate))"
-
-    if ($missing.Count -gt 0) {
-        Write-Warning "    published but NOT allowlisted, add these:"
-
-        foreach ($item in ($missing | Sort-Object Start)) {
-            Write-Warning "      $($item.Cidr)"
-        }
-    }
-
-    if ($stale.Count -gt 0) {
-        Write-Warning "    allowlisted but no longer published, consider removing:"
-
-        foreach ($item in ($stale | Sort-Object Start)) {
-            Write-Warning "      $($item.Cidr)"
-        }
-    }
-
-    Write-Warning "    Action: enter maintenance mode, update `$AtlassianAllowlist in"
-    Write-Warning "    Set-ClaudeVMNetworkMode.ps1 and the guest /etc/hosts pins, then re-lock."
 }
 
 Write-Host ""

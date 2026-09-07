@@ -657,7 +657,9 @@ A `401`, `403`, or `404` response is acceptable. The important result is that TC
 
 ### Pin Atlassian Hostnames
 
-Only needed when the VM is locked with `-Atlassian` (section 17). Resolve each hostname **separately** on the Windows host during a maintenance window:
+**Not needed for Jira access through Claude.** MCP connectors managed on your Claude account reach Atlassian through `mcp-proxy.anthropic.com`, not directly, so the only pin that matters for that path is the one in the Claude block above.
+
+These pins are needed only for **direct** access from the VM: `curl`, a REST script, or a locally configured MCP server pointed at `mcp.atlassian.com`. That also requires allowlisting the Atlassian ranges, which are no longer in the lock script (see section 17). Resolve each hostname **separately** on the Windows host during a maintenance window:
 
 ```powershell
 Resolve-DnsName mcp.atlassian.com   -Type A
@@ -679,7 +681,7 @@ Add the resolved addresses to `/etc/hosts` in the VM:
 13.227.180.4   <site>.atlassian.net
 ```
 
-The addresses above are examples. Use whatever DNS returns, and confirm each one falls inside an allowlisted range by running `Test-IPACLDrift.ps1` on the host (section 17).
+The addresses above are examples. Use whatever DNS returns. `Test-IPACLDrift.ps1` no longer checks Atlassian, so verify coverage by hand against whatever ranges you have allowlisted.
 
 Verify:
 
@@ -859,21 +861,13 @@ A `400`, `401`, `403`, or `405` response means TCP/TLS connectivity is working. 
 
 ### Atlassian Cloud Access
 
-Atlassian access is **off by default**. It is enabled per lock with the `-Atlassian` switch:
+`-Atlassian` is a **placeholder that applies no rules**. The switch is still accepted so existing invocations do not break, and passing it prints a warning saying it does nothing.
 
-```powershell
-C:\VMs\Set-ClaudeVMNetworkMode.ps1 -Mode locked -VMName claude-base -Atlassian
-```
+The Atlassian CIDRs were removed once traffic was shown to reach Atlassian through `mcp-proxy.anthropic.com` rather than directly. Managed MCP connectors are proxied by Anthropic, and that hostname resolves inside `160.79.104.0/21`, which is already allowlisted for Claude Code itself. The eight Atlassian ranges, roughly 7,500 addresses, were controlling an access path nothing was using.
 
-Turn it back off by locking without the switch. Locked mode removes any outbound allow rule that is not in the current desired set, so the Atlassian rules disappear on the next plain lock:
+If you ever need **direct** access from the VM to Atlassian, by `curl`, a REST script, or a locally configured MCP server pointed at `mcp.atlassian.com`, recover the ranges from git history and add the `/etc/hosts` pins from section 15. Both are required: the ACL change alone is not enough, because locked mode blocks DNS.
 
-```powershell
-C:\VMs\Set-ClaudeVMNetworkMode.ps1 -Mode locked -VMName claude-base
-```
-
-The ranges live in the `$AtlassianAllowlist` array in `Set-ClaudeVMNetworkMode.ps1`. They are Atlassian's published `ingress` ranges filtered to the commercial perimeter, product `jira`, IPv4 only, then collapsed to supernets. Eight CIDRs, roughly 7,500 addresses. Unlike the Codex `/32` entries these are Atlassian-operated space rather than shared CDN space.
-
-Enabling this also requires the `/etc/hosts` pins from section 15, because locked mode blocks DNS. The ACL change on its own is not enough.
+Worth recording, because it is a limitation rather than a fix: an IP allowlist cannot separate an MCP connector from the Claude API when both answer on the same address. See the note in section 26.
 
 ---
 
@@ -882,28 +876,28 @@ Enabling this also requires the `/etc/hosts` pins from section 15, because locke
 `C:\VMs\Test-IPACLDrift.ps1` reports where the applied ACLs no longer cover the addresses a provider actually resolves to. It is read-only: it never changes an ACL, a VM, or the guest.
 
 ```powershell
-C:\VMs\Test-IPACLDrift.ps1 -VMName claude-base -AtlassianSite <site>
+C:\VMs\Test-IPACLDrift.ps1 -VMName claude-base
 ```
 
 | Parameter | Default | Purpose |
 | --- | --- | --- |
-| `-Provider` | `all` | `claude`, `codex`, `atlassian`, or `all` |
+| `-Provider` | `all` | `claude`, `codex`, or `all` |
 | `-VMName` | `claude-base` | VM whose ACLs are read |
 | `-AdapterName` | auto-detected | resolved from the VM when not supplied |
 | `-DnsSamples` | `3` | DNS queries per hostname, to sample rotating pools |
-| `-AtlassianSite` | none | adds `<site>.atlassian.net` to the Atlassian checks |
 | `-FailOnDrift` | off | exit code 1 when drift is found, for scheduled runs |
 
-Two checks run per provider:
+One check runs per provider. Every address a provider hostname resolves to is tested against the union of the VM's outbound allow rules. An uncovered address is drift: pin it in `/etc/hosts` and the guest would still be blocked.
 
-* **DNS coverage**, for all three providers. Every address a provider hostname resolves to is tested against the union of the VM's outbound allow rules. An uncovered address is drift: pin it in `/etc/hosts` and the guest would still be blocked.
-* **Feed coverage**, for Atlassian only. Atlassian publishes a machine readable ingress feed at `https://ip-ranges.atlassian.com/`, and the script reports both what is published but not allowlisted, and what is allowlisted but no longer published. Anthropic and OpenAI publish egress ranges only, which are the addresses their servers call out from rather than the addresses their API hostnames answer on, so DNS is the only usable signal for those two.
+The hostnames checked include `mcp-proxy.anthropic.com`, because managed MCP connectors depend on it and its absence presents as a five second client timeout rather than an obvious network error.
 
-Nothing is applied automatically. When drift is reported, enter maintenance mode, update the array in `Set-ClaudeVMNetworkMode.ps1` and the `/etc/hosts` pins, then re-lock.
+There is no feed comparison. Only Atlassian published a usable ingress feed, and Atlassian is no longer checked. Anthropic and OpenAI publish egress ranges only, which are the addresses their servers call out from rather than the addresses their API hostnames answer on, so DNS is the only usable signal.
+
+Nothing is applied automatically. When drift is reported, enter maintenance mode, update the `$Allowlist` array in `Set-ClaudeVMNetworkMode.ps1` and the `/etc/hosts` pins, then re-lock.
 
 `locked` mode runs this script automatically after applying ACLs. The check is advisory: if it fails or is missing, locking still succeeds with a warning.
 
-A provider whose addresses are entirely uncovered is reported as `not currently allowlisted (toggled off?)` rather than as drift. That is the normal state for Atlassian when the switch is off.
+A provider whose addresses are entirely uncovered is reported as `not currently allowlisted (toggled off?)` rather than as drift, so a provider you have deliberately removed does not fill the report with noise.
 
 
 ## 18. Maintenance Mode Toggle
@@ -918,12 +912,12 @@ Parameters:
 | `-VMName` | `claude-base` | VM whose adapter ACLs are changed |
 | `-AdapterName` | auto-detected | resolved from the VM when not supplied |
 | `-SwitchName` | `fresh-claude-switch` | used to resolve the host-side IP |
-| `-Atlassian` | off | also allow the Atlassian Cloud ranges (section 17) |
+| `-Atlassian` | off | placeholder, applies no rules, warns when passed (section 17) |
 
 Behaviour:
 
 * `maintenance` removes the outbound `0.0.0.0/0` and `::/0` deny rules. The allow rules stay in place and the VM regains general outbound internet access.
-* `locked` applies every entry in the `$Allowlist` array, plus `$AtlassianAllowlist` when `-Atlassian` is passed, then re-applies both deny rules. It also **removes any outbound allow rule that is not in that set**, which is what makes `-Atlassian` reversible. Finally it runs `Test-IPACLDrift.ps1` if present, as an advisory check.
+* `locked` applies every entry in the `$Allowlist` array, then re-applies both deny rules. It also **removes any outbound allow rule that is not in that set**, so a rule added by an earlier version of the script, or by hand, does not survive the next lock. Finally it runs `Test-IPACLDrift.ps1` if present, as an advisory check.
 * `status` prints the current ACLs and changes nothing.
 
 Locked mode denies `::/0` as well as `0.0.0.0/0`. The IPv4 deny says nothing about IPv6, so without it the guest would be unconstrained over IPv6 the moment it acquired an address. This is inert on an IPv4-only guest.
@@ -1182,12 +1176,6 @@ Create one in maintenance mode:
 C:\VMs\New-ClaudeEphemeral.ps1 -Name claude-maint-001 -Maintenance
 ```
 
-Create one with Atlassian Cloud access for Jira work (see section 17):
-
-```powershell
-C:\VMs\New-ClaudeEphemeral.ps1 -Name claude-jira-001 -Atlassian
-```
-
 Check running VMs:
 
 ```powershell
@@ -1418,7 +1406,6 @@ This setup is intended to reduce sandbox risk by applying multiple controls:
 * VM outbound traffic restricted with Hyper-V VM network adapter ACLs.
 * Claude/Anthropic traffic allowed only by IP range.
 * General outbound traffic denied in locked mode, over both IPv4 (`0.0.0.0/0`) and IPv6 (`::/0`).
-* Atlassian Cloud access is off by default and must be enabled per lock with `-Atlassian`. It widens egress by roughly 7,500 addresses.
 * Locked mode is declarative: it removes any outbound allow rule it does not own, so a temporary widening cannot survive the next lock unnoticed.
 * Maintenance mode must be explicitly enabled for package installs or updates.
 * Sandbox user is non-root.
@@ -1431,6 +1418,7 @@ Important limitations:
 * `/etc/hosts` pinning can become stale if provider endpoint IPs change. A pinned address can stop being served while its CIDR stays allowlisted, which presents as a connection timeout rather than a firewall block. `Test-IPACLDrift.ps1` exists to surface this; it is not run on a schedule unless one is configured.
 * Normal outbound DNS is blocked in locked mode unless explicitly allowed.
 * If the VM is compromised, anything permitted by the ACL is still reachable.
+* **MCP connectors managed on your Claude account bypass the IP allowlist by design.** They are proxied through `mcp-proxy.anthropic.com`, which resolves to the same address as `api.anthropic.com` and sits inside the `160.79.104.0/21` range that Claude Code needs in order to run at all. No CIDR rule can permit one and deny the other, and Hyper-V ACLs cannot filter by hostname. Connectors also arrive already authenticated from the account, so the sandbox inherits whatever SaaS access that account holds. Treat the connector list on the account, not the network, as the control for this. Blackholing `mcp-proxy.anthropic.com` to `127.0.0.1` in `/etc/hosts` makes the normal path fail closed, but it is not a boundary: anything with code execution in the guest can dial the address directly and set its own SNI.
 * Static VM IPs should be protected from accidental reuse.
 * Do not run multiple clones with the same static IP at the same time.
 * Sensitive host directories should not be mounted into the VM unless required.
