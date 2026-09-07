@@ -552,13 +552,8 @@ Write-Host "revokes Atlassian access."
 Write-Host ""
 Write-Host "--- 2. Destroy ephemeral VMs ---"
 Write-Host ""
-Write-Host "Their differencing disks are parented to the template file, so replacing it"
-Write-Host "breaks the parent linkage and leaves those VMs unbootable. List them first:"
 Write-Host ""
 Write-Host ('Get-VM | Where-Object Name -like "{0}"' -f $EphemeralVmNamePattern)
-Write-Host ""
-Write-Host "Then destroy them:"
-Write-Host ""
 Write-Host ('Get-VM | Where-Object Name -like "{0}" | ForEach-Object {{ & "{1}" -Name $_.Name }}' -f $EphemeralVmNamePattern, $RemoveEphemeralScriptPath)
 Write-Host ""
 Write-Host "--- 3. Rebuild the read-only template disk ---"
