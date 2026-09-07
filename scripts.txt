@@ -27,7 +27,7 @@ cd repo
 git status
 
 # Pull a repo from VM to Windows
-scp -i "$env:USERPROFILE\.ssh\claude_sandbox_ed25519" -r user@172.30.101.50:/tmp/sec-agent/security/ \\wsl$\Ubuntu\home\nathrais\test\scan-results\
+scp -i "$env:USERPROFILE\.ssh\claude_sandbox_ed25519" -r sandbox@172.30.101.50:/home/sandbox/work/dev/tools/sast-agent "$env:USERPROFILE\Downloads\sast-agent-b1"
 
 # Destroy
 C:\VMs\Remove-ClaudeEphemeral.ps1 -Name claude-task-001
@@ -42,13 +42,20 @@ C:\VMs\Remove-ClaudeEphemeral.ps1 -Name claude-task-001
 # Maintenance
 #####################################################
 
+# prepare -> update inside the VM -> re-lock -> destroy clones -> rebuild template.
+
+# Update-ClaudeBase.ps1 performs the prepare half only. Everything from
+# "MAINTENANCE MODE STOP" onward is manual.
+
+## MAINTENANCE MODE START ##
 # Host: run from elevated PowerShell
 Set-ExecutionPolicy -Scope Process Bypass
-C:\VMs\Update-ClaudeBase.ps1
-C:\VMs\Update-ClaudeBase.ps1 -Force
+C:\VMs\Update-ClaudeBase.ps1 -Force -NoConnect
 
-# If you do not want vmconnect to open automatically:
-C:\VMs\Update-ClaudeBase.ps1 -NoConnect
+# Host: confirm maintenance networking is actually active before connecting.
+# There must be NO "0.0.0.0/0 Deny" row. If there is, apply it manually.
+C:\VMs\Set-ClaudeVMNetworkMode.ps1 -Mode status -VMName claude-base
+C:\VMs\Set-ClaudeVMNetworkMode.ps1 -Mode maintenance -VMName claude-base
 
 # Connect after the script starts claude-base
 ssh -i "C:\VMs\ssh\claude_sandbox_ed25519" sandbox@172.30.101.50
@@ -60,17 +67,22 @@ sudo apt autoremove -y
 sudo apt clean
 
 # Inside claude-base: make any baseline changes future clones should inherit
-# Examples:
+# Claude Code is a root-owned npm global install (readme section 13). Pin the
+# version so the image is reproducible:
+# sudo npm install -g @anthropic-ai/claude-code@2.1.258
+# claude --version
+# Other examples:
 # pipx upgrade-all
 # npm update -g
 # docker pull <image>
 # systemctl status ssh
 
+## MAINTENANCE MODE STOP ##
 # Host: when maintenance is finished, re-lock networking
-C:\VMs\Set-ClaudeVmNetworkMode.ps1 -Mode locked -VMName claude-base
+C:\VMs\Set-ClaudeVMNetworkMode.ps1 -Mode locked -VMName claude-base
 
 # Host: verify locked ACLs are restored
-C:\VMs\Set-ClaudeVmNetworkMode.ps1 -Mode status -VMName claude-base
+C:\VMs\Set-ClaudeVMNetworkMode.ps1 -Mode status -VMName claude-base
 
 # Host: shut down claude-base cleanly
 Stop-VM -Name "claude-base"
@@ -81,8 +93,21 @@ while ((Get-VM -Name "claude-base").State -ne "Off") {
 }
 
 ########
+# Host: DESTROY ephemeral VMs before rebuilding the template
+########
+# Ephemeral differencing disks are parented to the template file. Replacing it
+# breaks the parent linkage and leaves those VMs unbootable, so destroy them
+# first. Update-ClaudeBase.ps1 only stops them, it does not remove them.
+Get-VM | Where-Object Name -like "claude-ephemeral-*"
+
+Get-VM | Where-Object Name -like "claude-ephemeral-*" | ForEach-Object {
+    C:\VMs\Remove-ClaudeEphemeral.ps1 -Name $_.Name
+}
+
+########
 # Host: REBUILD the read-only template from the updated base disk
 ########
+# Skipping this step leaves every new clone on the previous image.
 $template = "C:\VMs\templates\claude-base-template.vhdx"
 $source   = "C:\HyperV\claude-base\claude-base.vhdx"
 
@@ -97,9 +122,8 @@ Set-ItemProperty -Path $template -Name IsReadOnly -Value $true
 # Host: final sanity checks
 Get-Item $template, $source | Select-Object FullName, IsReadOnly
 Get-VM -Name "claude-base"
-Get-Item "C:\VMs\templates\claude-base-template.vhdx" |
-    Select-Object FullName, IsReadOnly
-C:\VMs\Set-ClaudeVmNetworkMode.ps1 -Mode status -VMName claude-base
+Get-VM | Where-Object Name -like "claude-ephemeral-*"
+C:\VMs\Set-ClaudeVMNetworkMode.ps1 -Mode status -VMName claude-base
 
 
 #####################################################
@@ -112,8 +136,8 @@ C:\VMs\Set-ClaudeVmNetworkMode.ps1 -Mode status -VMName claude-base
 # ERROR: Cannot connect to Claude in Sandbox
 # SOLUTION:
 # - Check locked ACLs:
-#   C:\VMs\Set-ClaudeVmNetworkMode.ps1 -Mode status -VMName <vm-name>
+#   C:\VMs\Set-ClaudeVMNetworkMode.ps1 -Mode status -VMName <vm-name>
 # - Temporarily unlock networking:
-#   C:\VMs\Set-ClaudeVmNetworkMode.ps1 -Mode maintenance -VMName <vm-name>
+#   C:\VMs\Set-ClaudeVMNetworkMode.ps1 -Mode maintenance -VMName <vm-name>
 # - Re-lock when finished:
-#   C:\VMs\Set-ClaudeVmNetworkMode.ps1 -Mode locked -VMName <vm-name>
+#   C:\VMs\Set-ClaudeVMNetworkMode.ps1 -Mode locked -VMName <vm-name>
