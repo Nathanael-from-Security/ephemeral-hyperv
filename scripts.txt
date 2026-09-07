@@ -52,13 +52,43 @@ C:\VMs\Remove-ClaudeEphemeral.ps1 -Name claude-task-001
 Set-ExecutionPolicy -Scope Process Bypass
 C:\VMs\Update-ClaudeBase.ps1 -Force -NoConnect
 
+# Host: same, but also update the guest automatically over SSH.
+# -AutoUpdateGuest waits for port 22, then runs ONE sudo session that does:
+#   - apt update / upgrade / autoremove / clean
+#   - npm install -g @anthropic-ai/claude-code@<-ClaudeCodeVersion>  (root global)
+#   - npm install -g @openai/codex as the sandbox user
+#   - copies C:\VMs\SharedFolder\ contents into /home/sandbox, then chowns them
+#   - prints claude and codex versions
+# It logs in as 'user' and sudo prompts once, interactively.
+# No password is stored in the script or on disk.
+C:\VMs\Update-ClaudeBase.ps1 -Force -NoConnect -AutoUpdateGuest
+
+# Relevant defaults, override only if something has moved:
+#   -BaseVmIp           172.30.101.50
+#   -SshUser            user
+#   -SshKeyPath         C:\VMs\ssh\claude_sandbox_ed25519
+#   -SandboxUser        sandbox
+#   -ClaudeCodeVersion  2.1.258
+#   -SharedFolderPath   C:\VMs\SharedFolder
+#   -SshTimeoutSeconds  180
+C:\VMs\Update-ClaudeBase.ps1 -AutoUpdateGuest -ClaudeCodeVersion 2.1.263
+
+# NOTE: the SharedFolder copy overwrites same-named files in /home/sandbox.
+# The run prints "OVERWRITING:" or "adding:" per path before it copies.
+
 # Host: confirm maintenance networking is actually active before connecting.
 # There must be NO "0.0.0.0/0 Deny" row. If there is, apply it manually.
 C:\VMs\Set-ClaudeVMNetworkMode.ps1 -Mode status -VMName claude-base
 C:\VMs\Set-ClaudeVMNetworkMode.ps1 -Mode maintenance -VMName claude-base
 
-# Connect after the script starts claude-base
+# Connect after the script starts claude-base.
+# 'user' is the administrative account used for sudo work.
+# 'sandbox' is the workload account that owns /home/sandbox and runs codex.
+ssh -i "C:\VMs\ssh\claude_sandbox_ed25519" user@172.30.101.50
 ssh -i "C:\VMs\ssh\claude_sandbox_ed25519" sandbox@172.30.101.50
+
+# The steps below are the manual equivalent of -AutoUpdateGuest.
+# Skip them if the script already did the guest update.
 
 # Inside claude-base: verify maintenance networking
 sudo apt update

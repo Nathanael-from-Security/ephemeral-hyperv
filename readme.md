@@ -827,13 +827,13 @@ Run updates on the base VM, then rebuild the read-only template disk so new clon
 
 Do not update an ephemeral VM if you want the update to persist. Ephemeral VM changes are discarded when the VM is destroyed.
 
-`C:\VMs\Update-ClaudeBase.ps1` automates the preparation half only. It stops running ephemeral VMs, stops the base VM, clears the read-only attribute on the base and template disks, starts the base VM, switches it to maintenance networking, and opens `vmconnect`. It does not update anything inside the VM, does not re-lock networking, does not destroy ephemeral VMs, and does not rebuild the template. Those steps are manual and are listed below and in the script's own closing output.
+`C:\VMs\Update-ClaudeBase.ps1` automates the preparation half. It stops running ephemeral VMs, stops the base VM, clears the read-only attribute on the base and template disks, starts the base VM, switches it to maintenance networking, and opens `vmconnect`. With `-AutoUpdateGuest` it also performs the in-VM update described below. It does not re-lock networking, does not destroy ephemeral VMs, and does not rebuild the template. Those steps are manual and are listed below and in the script's own closing output.
 
 Full cycle:
 
 1. Prepare the base VM with `Update-ClaudeBase.ps1`.
 2. Confirm maintenance networking is active.
-3. Run updates inside `claude-base`.
+3. Run updates inside `claude-base`, either with `-AutoUpdateGuest` or by hand.
 4. Re-lock `claude-base`.
 5. Shut down `claude-base` and wait for `Off`.
 6. Destroy every ephemeral VM.
@@ -856,7 +856,45 @@ C:\VMs\Set-ClaudeVMNetworkMode.ps1 -Mode status -VMName claude-base
 C:\VMs\Set-ClaudeVMNetworkMode.ps1 -Mode maintenance -VMName claude-base
 ```
 
-Inside `claude-base`:
+### Automated guest update
+
+`-AutoUpdateGuest` performs the in-VM work over SSH instead of by hand:
+
+```powershell
+C:\VMs\Update-ClaudeBase.ps1 -Force -NoConnect -AutoUpdateGuest
+```
+
+It waits for port 22 to accept connections, stages the shared folder, then runs a single `sudo` session in the guest that:
+
+* runs `apt-get update`, `upgrade`, `autoremove` and `clean` with `DEBIAN_FRONTEND=noninteractive` and `--force-confold`;
+* installs the pinned Claude Code version as a root-owned npm global;
+* runs `npm install -g @openai/codex` as the sandbox user, via `sudo -u`;
+* copies the contents of `C:\VMs\SharedFolder\` into `/home/sandbox` and applies `chown -R sandbox:sandbox`;
+* prints the resulting `claude` and `codex` versions.
+
+Relevant parameters:
+
+| Parameter | Default | Purpose |
+| --- | --- | --- |
+| `-AutoUpdateGuest` | off | Opt in to the in-VM update. Nothing below applies without it. |
+| `-BaseVmIp` | `172.30.101.50` | Guest address used for SSH and SCP |
+| `-SshUser` | `user` | Administrative account used to log in and run `sudo` |
+| `-SshKeyPath` | `C:\VMs\ssh\claude_sandbox_ed25519` | Private key for both accounts |
+| `-SandboxUser` | `sandbox` | Workload account that owns `/home/sandbox` and runs codex |
+| `-ClaudeCodeVersion` | `2.1.258` | Pinned npm version, for a reproducible image |
+| `-SharedFolderPath` | `C:\VMs\SharedFolder` | Host folder copied into the sandbox home directory |
+| `-SshTimeoutSeconds` | `180` | How long to wait for SSH after the VM starts |
+
+Notes and limitations:
+
+* `sudo` prompts once for the password of `-SshUser`, interactively, because the whole guest update runs in one `ssh -t` session. No password is stored in the script, in a file, or in the environment. For genuinely unattended runs, add a scoped `NOPASSWD` rule in `/etc/sudoers.d/` for the specific commands rather than storing a secret.
+* The shared folder copy overwrites same-named files in `/home/sandbox`, including dotfiles. Each path is printed as `OVERWRITING:` or `adding:` before the copy runs.
+* Maintenance networking must be active first. If the network toggle script cannot be found, `Update-ClaudeBase.ps1` warns rather than throwing, and the guest update will then fail at the first `apt-get` fetch.
+* `-WhatIf` covers the `sudo` session only. Staging directory creation and the SCP uploads still execute.
+
+### Manual guest update
+
+Equivalent steps if you are not using `-AutoUpdateGuest`. Inside `claude-base`:
 
 ```bash
 sudo apt update
@@ -868,6 +906,10 @@ sudo apt clean
 # Pin the version so the image is reproducible.
 sudo npm install -g @anthropic-ai/claude-code@2.1.258
 claude --version
+
+# Codex is installed for the sandbox user only.
+sudo -u sandbox -H bash -lc 'npm install -g @openai/codex'
+sudo -u sandbox -H bash -lc 'codex --version'
 ```
 
 Host, re-lock and shut down:
