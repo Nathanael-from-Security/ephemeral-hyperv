@@ -133,7 +133,9 @@ C:\VMs\Set-ClaudeVMNetworkMode.ps1 -Mode status -VMName claude-base
 # ERROR: Hyper-V switch not found: fresh-claude-switch
 # SOLUTION: Run the startup script as admin
 
+# ### ###
 # ERROR: Cannot connect to Claude in Sandbox
+# ### ###
 # SOLUTION:
 # - Check locked ACLs:
 #   C:\VMs\Set-ClaudeVMNetworkMode.ps1 -Mode status -VMName <vm-name>
@@ -141,3 +143,77 @@ C:\VMs\Set-ClaudeVMNetworkMode.ps1 -Mode status -VMName claude-base
 #   C:\VMs\Set-ClaudeVMNetworkMode.ps1 -Mode maintenance -VMName <vm-name>
 # - Re-lock when finished:
 #   C:\VMs\Set-ClaudeVMNetworkMode.ps1 -Mode locked -VMName <vm-name>
+
+# ### ###
+# ERROR: IP access works but names do not resolve. sudo apt update fails.
+# ### ###
+# SYMPTOMS (inside the VM, in maintenance mode):
+#   ping -c3 1.1.1.1                                  -> works
+#   curl -4 -I --noproxy '*' http://1.1.1.1           -> works
+#   getent hosts archive.ubuntu.com                   -> no output
+#   sudo apt update / npm / curl by hostname          -> fail or time out
+#
+# CAUSE: This is a DNS problem, not an ACL problem. Hyper-V port ACLs are
+#   address-only and cannot filter by port, so a working IP path alongside a
+#   dead DNS path is never the lock script's fault. Some networks block
+#   outbound port 53 to third-party resolvers and force resolution through
+#   their own. Netplan ships with 1.1.1.1 and 8.8.8.8, which are unreachable
+#   on such a network, so systemd-resolved has no working upstream.
+#
+# CONFIRM (Windows host): test the resolver the VM is configured to use.
+#   Test-NetConnection -ComputerName 1.1.1.1 -Port 53
+#   PingSucceeded True with TcpTestSucceeded False means port 53 is filtered
+#   for the host as well, and the VM was never the problem.
+#
+# SOLUTION: point the VM at a resolver this network permits, usually its
+#   gateway. Find the host's own resolver (elevated PowerShell):
+#     Get-DnsClientServerAddress -AddressFamily IPv4 | Where-Object ServerAddresses
+#
+#   Test it in the VM before editing any config. This is runtime only:
+#     sudo resolvectl dns eth0 <network-resolver>
+#     resolvectl status
+#     getent hosts archive.ubuntu.com
+#
+#   If that resolves, persist it in netplan:
+#     sudo cp /etc/netplan/01-ai-sandbox.yaml /etc/netplan/01-ai-sandbox.yaml.bak
+#     sudo nano /etc/netplan/01-ai-sandbox.yaml
+#
+#   Set the nameservers block, most specific resolver first. Indentation must
+#   match the existing entries exactly:
+#
+#       nameservers:
+#         addresses:
+#           - <network-resolver>
+#           - 1.1.1.1
+#           - 8.8.8.8
+#
+#     sudo chmod 600 /etc/netplan/01-ai-sandbox.yaml
+#     sudo netplan generate
+#     sudo netplan apply
+#     resolvectl status
+#     getent hosts archive.ubuntu.com
+#     ip -4 addr show eth0
+#
+#   Roll back with:
+#     sudo cp /etc/netplan/01-ai-sandbox.yaml.bak /etc/netplan/01-ai-sandbox.yaml
+#     sudo netplan apply
+#
+# NOTES:
+# - systemd-resolved tries the list in order and fails over on timeout, so one
+#   config covers both permissive and restricted networks. The cost is a few
+#   seconds of timeout when the first entry is not present on the network.
+# - The resolver is site-specific. Working from a different network may need a
+#   different first entry.
+# - resolvectl dns is lost on reboot and on the next netplan apply. Only the
+#   netplan edit persists.
+# - The fix reaches ephemeral clones only after the template is rebuilt.
+# - Locked mode blocks port 53 by design, so this only ever affects maintenance
+#   windows. Claude hostnames stay pinned in /etc/hosts (readme section 15).
+# - While DNS is working, re-verify those pinned addresses. This is the only
+#   point in the cycle where real DNS is available:
+#     dig +short api.anthropic.com platform.claude.com claude.ai
+#   Each should fall inside 160.79.104.0/21.
+# - Permanent alternative: resolve over DNS-over-TLS (TCP 853) or
+#   DNS-over-HTTPS (TCP 443) so no resolver address is configured and no
+#   network's DNS policy applies. Requires allowlisting the resolver address
+#   for locked mode, which is a deliberate loosening of the current posture.
