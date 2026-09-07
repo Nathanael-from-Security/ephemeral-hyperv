@@ -12,7 +12,8 @@
       * Starts the base VM.
       * Switches the base VM to maintenance networking by calling
         -NetworkScriptPath with -Mode maintenance, which removes the
-        outbound deny-all ACL and restores general internet access.
+        outbound deny-all ACL and restores general internet access, then
+        re-reads the ACLs and fails if that deny rule is still present.
       * Opens vmconnect against the base VM unless -NoConnect is passed.
       * Prints the teardown sequence needed to finish the cycle.
 
@@ -78,6 +79,39 @@ function Assert-Administrator {
     if (-not $principal.IsInRole([Security.Principal.WindowsBuiltInRole]::Administrator)) {
         throw "Run this script from an elevated PowerShell session."
     }
+}
+
+function Get-AclRemoteAddress {
+    param(
+        [Parameter(Mandatory)]
+        $Acl
+    )
+
+    $property = $Acl.PSObject.Properties["RemoteAddress"]
+
+    if ($property -and -not [string]::IsNullOrWhiteSpace([string]$property.Value)) {
+        return ([string]$property.Value).Trim()
+    }
+
+    throw "Could not read the remote address of a VM network adapter ACL. Maintenance networking cannot be verified."
+}
+
+function Get-OutboundDenyAllAcl {
+    param(
+        [Parameter(Mandatory)]
+        [string]$VmName
+    )
+
+    $denyAllAddresses = @("0.0.0.0/0", "0.0.0.0")
+
+    return @(
+        Get-VMNetworkAdapterAcl -VMName $VmName |
+            Where-Object {
+                $_.Direction -eq "Outbound" -and
+                $_.Action -eq "Deny" -and
+                $denyAllAddresses -contains (Get-AclRemoteAddress -Acl $_)
+            }
+    )
 }
 
 function Stop-VmCleanly {
@@ -187,15 +221,32 @@ Write-Ok "Base VM started."
 
 Write-Step "Switching base VM networking to maintenance mode..."
 
+$maintenanceNetworkingApplied = $false
+
 if (Test-Path $NetworkScriptPath) {
     if ($PSCmdlet.ShouldProcess($NetworkScriptPath, "Enable maintenance networking")) {
         & $NetworkScriptPath -Mode maintenance
+        $maintenanceNetworkingApplied = $true
     }
 
     Write-Ok "Maintenance networking enabled."
 }
 else {
     Write-Warn "Network control script not found. Skipping: $NetworkScriptPath"
+}
+
+if ($maintenanceNetworkingApplied) {
+    Write-Step "Verifying the outbound deny-all ACL is gone..."
+
+    $denyAllAcls = @(Get-OutboundDenyAllAcl -VmName $BaseVmName)
+
+    if ($denyAllAcls.Count -gt 0) {
+        Get-VMNetworkAdapterAcl -VMName $BaseVmName | Format-Table -AutoSize | Out-String | Write-Host
+
+        throw "Maintenance networking did not take effect: an outbound 0.0.0.0/0 Deny ACL is still present on $BaseVmName. The base VM has no general internet access. Fix the ACLs before continuing."
+    }
+
+    Write-Ok "No outbound deny-all ACL remains on $BaseVmName."
 }
 
 if (-not $NoConnect) {

@@ -45,6 +45,70 @@ $Allowlist = @(
     "172.66.0.243/32"
 )
 
+function Show-Acls {
+    Get-VMNetworkAdapterAcl `
+        -VMName $VMName `
+        -VMNetworkAdapterName $AdapterName
+}
+
+function Get-AclAddressVariants {
+    param(
+        [Parameter(Mandatory = $true)]
+        [string]$IP
+    )
+
+    $variants = @($IP)
+
+    if ($IP -match "^(.+)/32$") {
+        $variants += $Matches[1]
+    }
+    elseif ($IP -match "^(.+)/0$") {
+        $variants += $Matches[1]
+    }
+    elseif ($IP -match "^\d+\.\d+\.\d+\.\d+$") {
+        $variants += "$IP/32"
+    }
+
+    return @($variants | Select-Object -Unique)
+}
+
+function Get-AclRemoteAddress {
+    param(
+        [Parameter(Mandatory = $true)]
+        $Acl
+    )
+
+    $property = $Acl.PSObject.Properties["RemoteAddress"]
+
+    if ($property -and -not [string]::IsNullOrWhiteSpace([string]$property.Value)) {
+        return ([string]$property.Value).Trim()
+    }
+
+    throw "Could not read the remote address of a VM network adapter ACL on $VMName ($AdapterName). ACL state cannot be verified."
+}
+
+function Get-MatchingAcls {
+    param(
+        [Parameter(Mandatory = $true)]
+        [string]$IP,
+
+        [Parameter(Mandatory = $false)]
+        [ValidateSet("Allow", "Deny")]
+        [string]$Action = "Allow"
+    )
+
+    $variants = Get-AclAddressVariants -IP $IP
+
+    return @(
+        Show-Acls |
+            Where-Object {
+                $_.Direction -eq "Outbound" -and
+                $_.Action -eq $Action -and
+                $variants -contains (Get-AclRemoteAddress -Acl $_)
+            }
+    )
+}
+
 function Remove-Acl {
     param(
         [Parameter(Mandatory = $true)]
@@ -55,23 +119,16 @@ function Remove-Acl {
         [string]$Action = "Allow"
     )
 
-    $variants = @($IP)
-
-    if ($IP -match "^(.+)/32$") {
-        $variants += $Matches[1]
-    }
-    elseif ($IP -match "^\d+\.\d+\.\d+\.\d+$") {
-        $variants += "$IP/32"
-    }
-
-    foreach ($variant in $variants | Select-Object -Unique) {
+    # Only rules that exist are removed, so a missing rule is not an error and
+    # a failed removal is never swallowed.
+    foreach ($existing in Get-MatchingAcls -IP $IP -Action $Action) {
         Remove-VMNetworkAdapterAcl `
             -VMName $VMName `
             -VMNetworkAdapterName $AdapterName `
-            -RemoteIPAddress $variant `
+            -RemoteIPAddress (Get-AclRemoteAddress -Acl $existing) `
             -Direction Outbound `
             -Action $Action `
-            -ErrorAction SilentlyContinue
+            -ErrorAction Stop
     }
 }
 
@@ -95,17 +152,19 @@ function Set-Acl {
         -Action $Action
 }
 
-function Show-Acls {
-    Get-VMNetworkAdapterAcl `
-        -VMName $VMName `
-        -VMNetworkAdapterName $AdapterName
-}
-
 switch ($Mode) {
     "maintenance" {
         Write-Host "Entering maintenance mode for VM: $VMName"
 
         Remove-Acl -IP "0.0.0.0/0" -Action Deny
+
+        $remainingDeny = @(Get-MatchingAcls -IP "0.0.0.0/0" -Action Deny)
+
+        if ($remainingDeny.Count -gt 0) {
+            Write-Host ""
+            Show-Acls
+            throw "Failed to remove the outbound 0.0.0.0/0 Deny ACL from $VMName ($AdapterName). The VM is still network locked."
+        }
 
         Write-Host ""
         Write-Host "Maintenance mode active. VM can use general outbound internet."
