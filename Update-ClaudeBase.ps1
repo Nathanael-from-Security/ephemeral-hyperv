@@ -14,12 +14,20 @@
         -NetworkScriptPath with -Mode maintenance, which removes the
         outbound deny-all ACL and restores general internet access, then
         re-reads the ACLs and fails if that deny rule is still present.
+      * With -AutoUpdateGuest, connects over SSH and, in one sudo session:
+        upgrades apt packages, installs the pinned Claude Code version as a
+        root-owned npm global, updates Codex for the sandbox user, and copies
+        the contents of -SharedFolderPath into the sandbox home directory.
+        sudo prompts once, interactively. No password is stored anywhere.
       * Opens vmconnect against the base VM unless -NoConnect is passed.
       * Prints the teardown sequence needed to finish the cycle.
 
     WHAT THIS SCRIPT DOES NOT DO
-      * It does not update anything inside the VM. Package, npm and any other
-        baseline changes are performed manually over SSH or the console.
+      * Without -AutoUpdateGuest it does not update anything inside the VM.
+        Baseline changes are then performed manually over SSH or the console.
+      * It does not run unattended. -AutoUpdateGuest still requires the sudo
+        password to be typed once. For unattended runs, add a scoped NOPASSWD
+        rule in /etc/sudoers.d/ for the specific commands involved.
       * It does not re-lock networking afterwards.
       * It does not shut the base VM down afterwards.
       * It does not destroy ephemeral VMs. They are only stopped, because a
@@ -49,6 +57,22 @@ param(
 
     [string]$NetworkScriptPath = "C:\VMs\Set-ClaudeVMNetworkMode.ps1",
 
+    [string]$BaseVmIp = "172.30.101.50",
+
+    [string]$SshUser = "user",
+
+    [string]$SshKeyPath = "C:\VMs\ssh\claude_sandbox_ed25519",
+
+    [string]$SandboxUser = "sandbox",
+
+    [string]$ClaudeCodeVersion = "2.1.258",
+
+    [string]$SharedFolderPath = "C:\VMs\SharedFolder",
+
+    [int]$SshTimeoutSeconds = 180,
+
+    [switch]$AutoUpdateGuest,
+
     [switch]$Force,
 
     [switch]$NoConnect
@@ -70,6 +94,90 @@ function Write-Ok {
 function Write-Warn {
     param([string]$Message)
     Write-Warning $Message
+}
+
+function Wait-ForSsh {
+    param(
+        [Parameter(Mandatory)]
+        [string]$IpAddress,
+
+        [int]$TimeoutSeconds = 180
+    )
+
+    Write-Step "Waiting for SSH on ${IpAddress}:22 (timeout ${TimeoutSeconds}s)..."
+
+    $deadline = (Get-Date).AddSeconds($TimeoutSeconds)
+
+    do {
+        $reachable = Test-NetConnection `
+            -ComputerName $IpAddress `
+            -Port 22 `
+            -InformationLevel Quiet `
+            -WarningAction SilentlyContinue
+
+        if ($reachable) {
+            Write-Ok "SSH is accepting connections."
+            return
+        }
+
+        Start-Sleep -Seconds 3
+    } while ((Get-Date) -lt $deadline)
+
+    throw "SSH did not become available on $IpAddress within $TimeoutSeconds seconds."
+}
+
+function Invoke-Ssh {
+    param(
+        [Parameter(Mandatory)]
+        [string[]]$SshArgument,
+
+        [switch]$Interactive
+    )
+
+    $baseArgs = @(
+        "-i", $SshKeyPath,
+        "-o", "StrictHostKeyChecking=accept-new",
+        "-o", "ConnectTimeout=10"
+    )
+
+    if ($Interactive) {
+        $baseArgs += "-t"
+    }
+    else {
+        $baseArgs += @("-o", "BatchMode=yes")
+    }
+
+    $allArgs = $baseArgs + @("$SshUser@$BaseVmIp") + $SshArgument
+
+    & ssh.exe @allArgs
+
+    if ($LASTEXITCODE -ne 0) {
+        throw "ssh failed with exit code $LASTEXITCODE"
+    }
+}
+
+function Copy-ToGuest {
+    param(
+        [Parameter(Mandatory)]
+        [string[]]$Path,
+
+        [Parameter(Mandatory)]
+        [string]$Destination
+    )
+
+    $scpArgs = @(
+        "-r",
+        "-i", $SshKeyPath,
+        "-o", "StrictHostKeyChecking=accept-new",
+        "-o", "BatchMode=yes",
+        "-o", "ConnectTimeout=10"
+    ) + $Path + @("${SshUser}@${BaseVmIp}:${Destination}")
+
+    & scp.exe @scpArgs
+
+    if ($LASTEXITCODE -ne 0) {
+        throw "scp failed with exit code $LASTEXITCODE"
+    }
 }
 
 function Assert-Administrator {
@@ -247,6 +355,118 @@ if ($maintenanceNetworkingApplied) {
     }
 
     Write-Ok "No outbound deny-all ACL remains on $BaseVmName."
+}
+
+if ($AutoUpdateGuest) {
+    Write-Step "Updating the guest over SSH..."
+
+    Wait-ForSsh -IpAddress $BaseVmIp -TimeoutSeconds $SshTimeoutSeconds
+
+    $staging = "/tmp/claude-base-staging"
+
+    Write-Step "Preparing staging directory in the guest..."
+    Invoke-Ssh -SshArgument @("rm -rf '$staging' && mkdir -p '$staging'")
+
+    $sharedItems = @()
+
+    if (Test-Path $SharedFolderPath) {
+        $sharedItems = @(
+            Get-ChildItem -LiteralPath $SharedFolderPath -Force |
+                ForEach-Object { $_.FullName }
+        )
+    }
+    else {
+        Write-Warn "Shared folder not found, skipping copy: $SharedFolderPath"
+    }
+
+    if ($sharedItems.Count -gt 0) {
+        Write-Step "Copying $($sharedItems.Count) item(s) from $SharedFolderPath to the guest..."
+        Copy-ToGuest -Path $sharedItems -Destination "$staging/"
+        Write-Ok "Shared folder staged in the guest."
+    }
+    else {
+        Write-Ok "Shared folder is empty. Nothing to copy."
+    }
+
+    $remoteScript = @'
+#!/usr/bin/env bash
+set -euo pipefail
+
+SANDBOX_USER="__SANDBOX_USER__"
+SANDBOX_HOME="/home/__SANDBOX_USER__"
+STAGING="/tmp/claude-base-staging"
+CLAUDE_VERSION="__CLAUDE_VERSION__"
+
+export DEBIAN_FRONTEND=noninteractive
+
+echo "[*] Updating apt packages..."
+apt-get update
+apt-get -y -o Dpkg::Options::=--force-confold upgrade
+apt-get -y autoremove
+apt-get clean
+
+echo "[*] Installing Claude Code ${CLAUDE_VERSION} (root-owned npm global)..."
+npm install -g "@anthropic-ai/claude-code@${CLAUDE_VERSION}"
+
+echo "[*] Updating Codex for ${SANDBOX_USER}..."
+sudo -u "${SANDBOX_USER}" -H bash -lc 'npm install -g @openai/codex'
+
+if [ -d "${STAGING}" ] && [ -n "$(ls -A "${STAGING}" 2>/dev/null)" ]; then
+    echo "[*] Copying shared folder contents into ${SANDBOX_HOME}..."
+
+    for item in "${STAGING}"/* "${STAGING}"/.[!.]*; do
+        [ -e "${item}" ] || continue
+        target="${SANDBOX_HOME}/$(basename "${item}")"
+        if [ -e "${target}" ]; then
+            echo "    OVERWRITING: ${target}"
+        else
+            echo "    adding:      ${target}"
+        fi
+    done
+
+    cp -a "${STAGING}"/. "${SANDBOX_HOME}"/
+    chown -R "${SANDBOX_USER}:${SANDBOX_USER}" "${SANDBOX_HOME}"
+    rm -rf "${STAGING}"
+
+    echo "[+] Shared folder contents copied."
+else
+    echo "[*] No shared folder content to copy."
+fi
+
+echo "[*] Installed versions:"
+claude --version || echo "    claude: not available"
+sudo -u "${SANDBOX_USER}" -H bash -lc 'codex --version' || echo "    codex: not available"
+
+echo "[+] Guest update complete."
+'@
+
+    $remoteScript = $remoteScript.
+        Replace("__SANDBOX_USER__", $SandboxUser).
+        Replace("__CLAUDE_VERSION__", $ClaudeCodeVersion).
+        Replace("`r`n", "`n")
+
+    $localScript = Join-Path $env:TEMP "claude-base-maint.sh"
+
+    [System.IO.File]::WriteAllText(
+        $localScript,
+        $remoteScript,
+        (New-Object System.Text.UTF8Encoding($false))
+    )
+
+    Write-Step "Uploading guest maintenance script..."
+    Copy-ToGuest -Path @($localScript) -Destination "/tmp/claude-base-maint.sh"
+
+    Write-Host ""
+    Write-Host "sudo will prompt for the password of '$SshUser' once, below."
+    Write-Host ""
+
+    if ($PSCmdlet.ShouldProcess($BaseVmName, "Run guest maintenance over SSH")) {
+        Invoke-Ssh -Interactive -SshArgument @("sudo bash /tmp/claude-base-maint.sh")
+    }
+
+    Remove-Item $localScript -Force -ErrorAction SilentlyContinue
+
+    Write-Ok "Guest update finished."
 }
 
 if (-not $NoConnect) {

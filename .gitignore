@@ -1,6 +1,7 @@
 ClaudeSandbox/
 ephemeral/
 Exports/
+SharedFolder/
 ssh/
 templates/
 *.iso
