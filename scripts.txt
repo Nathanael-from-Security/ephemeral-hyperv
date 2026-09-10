@@ -28,6 +28,9 @@ git status
 
 # Pull a repo from VM to Windows
 scp -i "$env:USERPROFILE\.ssh\claude_sandbox_ed25519" -r sandbox@172.30.101.50:/home/sandbox/work/dev/tools/sast-agent "$env:USERPROFILE\Downloads\sast-agent-b1"
+# Pull Baseliner results VM to Windows
+scp -i "$env:USERPROFILE\.ssh\claude_sandbox_ed25519" -r sandbox@172.30.101.50:/home/sandbox/work/dev/tools/sast-agent-baseliner/results "$env:USERPROFILE\Documents\DEV\PowerBI\sast-agent-baseliner\results"
+
 
 # Destroy
 C:\VMs\Remove-ClaudeEphemeral.ps1 -Name claude-task-001
